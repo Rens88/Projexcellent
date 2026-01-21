@@ -1,0 +1,14 @@
+Ideetjes om rapportage te verbeteren:
+- Gefactureerde uren zichtbaar maken per maand
+- Verschil gefactureerde en gerapporteerde uren zichtbaar maken als "unassigned"
+-> Hours per programma opvullen met unassigned uren (schatting)?
+- Gefactureerde uren uitdrukken als percentage gewerkte uren
+- Tot nu toe gefactueerde uren uitdrukken als percentage beschikbare uren
+- Expliciet melden wanneer uren opzet obv "nog niet ingepland" als Sport Science Centre uren
+
+Rapportage:
+- hours per project per program
+- hours per project per contact person
+--> Splitsing maken van analyse hele kalenderjaar en meest recente maand.
+- Calenderweergave wanneer project open en wanneer gesloten
+
