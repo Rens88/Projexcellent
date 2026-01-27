@@ -1,4 +1,7 @@
 Ideetjes om rapportage te verbeteren:
+
+- Splits rapportage op in: maak jaar-rapportage en maak maand-rapportage	
+
 - Gefactureerde uren zichtbaar maken per maand
 - Verschil gefactureerde en gerapporteerde uren zichtbaar maken als "unassigned"
 -> Hours per programma opvullen met unassigned uren (schatting)?

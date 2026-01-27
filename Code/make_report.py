@@ -16,10 +16,11 @@ What this script does
 5) Reads time spent from time_log.xlsx (sheet: TimeLog, rows under the header),
    aggregates hours per project and per programma/requester.
 6) Creates a single HTML report (Plotly) with:
-   - Projects per programma (stacked: each project is one block)
+   - Projects per programma (stacked: each project is one block; supports multiple programma values)
+   - Projects per theme (stacked: each project is one block)
    - Projects per requester (stacked: each project is one block)
-   - Hours per programma (stacked: each project contributes its hours)
-   - Trend: projects started per month vs closed per month
+   - Hours per programma (stacked: each project contributes its hours; supports multiple programma values)
+   - Active projects per week (stacked by project)
 7) Exports:
    - YYYY-MM-DD_project_report.html
    - YYYY-MM-DD_project_report.png
@@ -32,6 +33,7 @@ pip install pandas openpyxl plotly kaleido
 
 from __future__ import annotations
 
+import shutil
 import base64
 import os
 import warnings
@@ -220,6 +222,59 @@ def parse_date(value: Any) -> Optional[pd.Timestamp]:
     return ts
 
 
+def _split_pipe_values(val: Any) -> List[str]:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return []
+    parts = str(val).split("|")
+    return [p.strip() for p in parts if p and p.strip()]
+
+
+def _clean_group_value(val: Any) -> Optional[str]:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    s = str(val).strip()
+    if not s:
+        return None
+    return "Unknown" if s.lower() == "unknown" else s
+
+
+def extract_group_values(row: pd.Series, base_col: str) -> List[str]:
+    """
+    Returns ordered unique values for a base column that may have numbered variants (e.g., programma, programma02).
+    Skips empty entries and prefers real values over 'Unknown'.
+    """
+    matches: List[Tuple[int, str]] = []
+    base_len = len(base_col)
+    for col in row.index:
+        if col == base_col:
+            matches.append((1, col))
+        elif col.startswith(base_col) and col[base_len:].isdigit():
+            matches.append((int(col[base_len:]), col))
+
+    values: List[str] = []
+    saw_unknown = False
+    for _, col in sorted(matches, key=lambda x: x[0]):
+        val = _clean_group_value(row.get(col))
+        if val is None:
+            continue
+        if val == "Unknown":
+            saw_unknown = True
+            continue
+        if val not in values:
+            values.append(val)
+
+    if values:
+        return values
+    return ["Unknown"] if saw_unknown else []
+
+
+def _split_pipe_values(val: Any) -> List[str]:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return []
+    parts = str(val).split("|")
+    return [p.strip() for p in parts if p and p.strip()]
+
+
 # ----------------------------
 # Reading time_log.xlsx
 # ----------------------------
@@ -383,6 +438,18 @@ def load_and_validate_projects(projecten_dir: str) -> Tuple[pd.DataFrame, pd.Dat
         project_row["target_end_date"] = parse_date(info.get("target_end_date"))
         project_row["actual_end_date"] = actual_end_date
 
+        programma_values = _split_pipe_values(project_row.get("programma (if multiple, separate by |)") or project_row.get("programma"))
+        if programma_values:
+            project_row["programma"] = programma_values[0]
+            for idx, extra in enumerate(programma_values[1:], start=2):
+                project_row[f"programma{idx:02d}"] = extra
+
+        theme_values = _split_pipe_values(project_row.get("theme (if multiple, separate by |)") or project_row.get("theme"))
+        if theme_values:
+            project_row["theme"] = theme_values[0]
+            for idx, extra in enumerate(theme_values[1:], start=2):
+                project_row[f"theme{idx:02d}"] = extra
+
         # Next step #2: hours aggregation from time_log.xlsx
         if os.path.exists(time_log_path):
             meta = read_time_log_project_metadata(time_log_path)
@@ -407,12 +474,15 @@ def load_and_validate_projects(projecten_dir: str) -> Tuple[pd.DataFrame, pd.Dat
 
     projects_df = pd.DataFrame(project_rows)
 
-    for col in ["programma", "requester", "status", "project_name"]:
+    for col in ["programma", "requester", "status", "project_name", "theme"]:
         if col not in projects_df.columns:
             projects_df[col] = "Unknown"
         projects_df[col] = projects_df[col].fillna("Unknown").replace("", "Unknown")
 
     time_entries_df = pd.concat(all_time_entries, ignore_index=True) if all_time_entries else pd.DataFrame()
+
+    projects_df = projects_df.sort_values(["created_at"]).reset_index(drop=True)
+    time_entries_df = time_entries_df.sort_values(["Date*"]).reset_index(drop=True)
     return projects_df, time_entries_df
 
 
@@ -427,6 +497,7 @@ HOVER_KEYS = [
     "owner",
     "status",
     "priority",
+    "theme",
     "start_date",
     "target_end_date",
     "actual_end_date",
@@ -555,26 +626,38 @@ def add_stacked_project_count_bars(
     title: str,
     project_color_map: Dict[str, str],
 ) -> None:
-    groups = sorted(projects_df[group_col].dropna().unique().tolist())
-    fig.update_xaxes(categoryorder="array", categoryarray=groups, row=subplot_row, col=1)
+    all_groups: set[str] = set()
+    project_groups: List[Tuple[pd.Series, List[str]]] = []
 
     for _, project in projects_df.iterrows():
-        group_val = project.get(group_col, "Unknown")
+        values = extract_group_values(project, group_col)
+        if not values:
+            values = ["Unknown"]
+        values = list(dict.fromkeys(values))  # preserve order, drop dupes
+        project_groups.append((project, values))
+        all_groups.update(values)
+
+    groups = sorted(all_groups)
+    fig.update_xaxes(categoryorder="array", categoryarray=groups, row=subplot_row, col=1)
+
+    for project, values in project_groups:
         hover = build_hover_text(project)
         project_id = project.get("project_id")
+        bar_name = str(project.get("project_name", project.get("project_id", "project")))
 
-        fig.add_trace(
-            go.Bar(
-                x=[group_val],
-                y=[1],
-                name=str(project.get("project_name", project.get("project_id", "project"))),
-                hovertemplate=hover + "<extra></extra>",
-                marker_color=project_color_map.get(project_id, BASE_BLACK),
-                showlegend=False,
-            ),
-            row=subplot_row,
-            col=1,
-        )
+        for group_val in values:
+            fig.add_trace(
+                go.Bar(
+                    x=[group_val],
+                    y=[1],
+                    name=bar_name,
+                    hovertemplate=hover + "<extra></extra>",
+                    marker_color=project_color_map.get(project_id, BASE_BLACK),
+                    showlegend=False,
+                ),
+                row=subplot_row,
+                col=1,
+            )
 
     fig.update_yaxes(title_text="Project count", row=subplot_row, col=1)
     fig.add_annotation(
@@ -626,27 +709,38 @@ def add_stacked_hours_bars(
     merged = projects_df.merge(project_hours, on="project_id", how="left")
     merged["total_hours"] = merged["total_hours"].fillna(0)
 
-    groups = sorted(merged[group_col].dropna().unique().tolist())
-    fig.update_xaxes(categoryorder="array", categoryarray=groups, row=subplot_row, col=1)
+    all_groups: set[str] = set()
+    project_groups: List[Tuple[pd.Series, List[str]]] = []
 
     for _, project in merged.iterrows():
-        group_val = project.get(group_col, "Unknown")
+        values = extract_group_values(project, group_col)
+        if not values:
+            values = ["Unknown"]
+        values = list(dict.fromkeys(values))
+        project_groups.append((project, values))
+        all_groups.update(values)
+
+    groups = sorted(all_groups)
+    fig.update_xaxes(categoryorder="array", categoryarray=groups, row=subplot_row, col=1)
+
+    for project, values in project_groups:
         hours = float(project.get("total_hours", 0.0))
         hover = build_hover_text(project, extra={"total_hours": f"{hours:.2f}"})
         project_id = project.get("project_id")
 
-        fig.add_trace(
-            go.Bar(
-                x=[group_val],
-                y=[hours],
-                name=str(project.get("project_name", project.get("project_id", "project"))),
-                hovertemplate=hover + "<extra></extra>",
-                marker_color=project_color_map.get(project_id, BASE_BLACK),
-                showlegend=False,
-            ),
-            row=subplot_row,
-            col=1,
-        )
+        for group_val in values:
+            fig.add_trace(
+                go.Bar(
+                    x=[group_val],
+                    y=[hours],
+                    name=str(project.get("project_name", project.get("project_id", "project"))),
+                    hovertemplate=hover + "<extra></extra>",
+                    marker_color=project_color_map.get(project_id, BASE_BLACK),
+                    showlegend=False,
+                ),
+                row=subplot_row,
+                col=1,
+            )
 
     fig.update_yaxes(title_text="Hours", row=subplot_row, col=1)
     fig.add_annotation(
@@ -661,90 +755,198 @@ def add_stacked_hours_bars(
         col=1,
     )
 
-def add_trend_started_closed(fig: go.Figure, projects_df: pd.DataFrame, subplot_row: int, title: str) -> None:
-    started = projects_df.dropna(subset=["start_date"]).copy()
-    started["month"] = started["start_date"].dt.to_period("M").dt.to_timestamp()
-    started_counts = started.groupby("month").size().rename("started").reset_index()
+def add_trend_started_closed(
+    fig: go.Figure,
+    projects_df: pd.DataFrame,
+    subplot_row: int,
+    title: str,
+    project_color_map: Optional[Dict[str, str]] = None,
+) -> None:
+    active = projects_df.dropna(subset=["start_date"]).copy()
 
-    closed = projects_df.dropna(subset=["actual_end_date"]).copy()
-    closed["month"] = closed["actual_end_date"].dt.to_period("M").dt.to_timestamp()
-    closed_counts = closed.groupby("month").size().rename("closed").reset_index()
+    def _resolve_end_date(row: pd.Series) -> pd.Timestamp:
+        if pd.notna(row.get("actual_end_date")):
+            return row["actual_end_date"]
+        if pd.notna(row.get("target_end_date")):
+            return row["target_end_date"]
+        start = row.get("start_date")
+        if pd.notna(start):
+            return pd.Timestamp(date(start.year, 12, 31))
+        return pd.NaT
 
-    month_series: List[pd.Series] = []
-    if not started_counts.empty:
-        month_series.append(started_counts["month"])
-    if not closed_counts.empty:
-        month_series.append(closed_counts["month"])
+    active["end_date"] = active.apply(_resolve_end_date, axis=1)
+    active = active.dropna(subset=["end_date"])
 
-    if month_series:
-        months = pd.concat(month_series).drop_duplicates().sort_values().reset_index(drop=True)
-    else:
-        months = pd.Series(dtype="datetime64[ns]")
-
-    if len(months) == 0:
-        fig.add_trace(go.Scatter(x=[], y=[], mode="lines", hovertemplate="No trend data.<extra></extra>"), row=subplot_row, col=1)
-        fig.add_annotation(text=f"<b>{title}</b> (no dates found)", x=0, xref="x domain", y=1.12, yref=f"y{subplot_row} domain",
-                           showarrow=False, align="left", row=subplot_row, col=1)
-        fig.update_yaxes(title_text="Projects", row=subplot_row, col=1)
+    if active.empty:
+        fig.add_trace(
+            go.Bar(x=[], y=[], hovertemplate="No weekly activity data.<extra></extra>"),
+            row=subplot_row,
+            col=1,
+        )
+        fig.add_annotation(
+            text=f"<b>{title}</b> (no dates found)",
+            x=0,
+            xref="x domain",
+            y=1.12,
+            yref=f"y{subplot_row} domain",
+            showarrow=False,
+            align="left",
+            row=subplot_row,
+            col=1,
+        )
+        fig.update_yaxes(title_text="Active projects", row=subplot_row, col=1)
         return
 
-    trend = pd.DataFrame({"month": months})
-    trend = trend.merge(started_counts, on="month", how="left").merge(closed_counts, on="month", how="left").fillna(0)
-
-    fig.add_trace(
-        go.Scatter(
-            x=trend["month"],
-            y=trend["started"],
-            mode="lines+markers",
-            name="Started",
-            hovertemplate="Month=%{x|%Y-%m}<br>Started=%{y}<extra></extra>",
-            line=dict(color=BASE_BLUE),
-            marker=dict(color=BASE_BLUE),
-        ),
-        row=subplot_row, col=1
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=trend["month"],
-            y=trend["closed"],
-            mode="lines+markers",
-            name="Closed",
-            hovertemplate="Month=%{x|%Y-%m}<br>Closed=%{y}<extra></extra>",
-            line=dict(color=BASE_ORANGE),
-            marker=dict(color=BASE_ORANGE),
-        ),
-        row=subplot_row, col=1
+    active["start_week"] = active["start_date"].dt.to_period("W-MON").dt.to_timestamp()
+    active["end_week"] = active["end_date"].dt.to_period("W-MON").dt.to_timestamp()
+    active.loc[active["end_week"] < active["start_week"], "end_week"] = active["start_week"]
+    active["weeks_active"] = active.apply(
+        lambda row: pd.date_range(row["start_week"], row["end_week"], freq="W-MON"),
+        axis=1,
     )
 
-    fig.update_yaxes(title_text="Projects", row=subplot_row, col=1)
-    fig.update_xaxes(title_text="Month", row=subplot_row, col=1)
+    weekly = (
+        active[["project_id", "weeks_active"]]
+        .explode("weeks_active")
+        .rename(columns={"weeks_active": "week"})
+        .dropna(subset=["week", "project_id"])
+    )
+    weekly["project_id"] = weekly["project_id"].astype(str)
+
+    if weekly.empty:
+        fig.add_trace(
+            go.Bar(x=[], y=[], hovertemplate="No weekly activity data.<extra></extra>"),
+            row=subplot_row,
+            col=1,
+        )
+        fig.add_annotation(
+            text=f"<b>{title}</b> (no active weeks)",
+            x=0,
+            xref="x domain",
+            y=1.12,
+            yref=f"y{subplot_row} domain",
+            showarrow=False,
+            align="left",
+            row=subplot_row,
+            col=1,
+        )
+        fig.update_yaxes(title_text="Active projects", row=subplot_row, col=1)
+        return
+
+    weekly_counts = pd.crosstab(weekly["week"], weekly["project_id"]).sort_index()
+
+    project_rows = active.drop_duplicates(subset=["project_id"]).copy()
+    project_rows["project_id"] = project_rows["project_id"].astype(str)
+    project_rows = project_rows.set_index("project_id")
+
+    def _fmt_date(val: Any) -> Optional[str]:
+        if pd.isna(val):
+            return None
+        try:
+            return pd.Timestamp(val).date().isoformat()
+        except Exception:
+            return str(val)
+
+    hover_map: Dict[str, str] = {}
+    for pid, row in project_rows.iterrows():
+        extras = {
+            "resolved_end_date": _fmt_date(row.get("end_date")),
+            "start_week": _fmt_date(row.get("start_week")),
+            "end_week": _fmt_date(row.get("end_week")),
+        }
+        hover_map[pid] = build_hover_text(row, extra={k: v for k, v in extras.items() if v is not None})
+
+    def _project_sort_key(project_id: str) -> Tuple[int, str]:
+        try:
+            return int(project_id.replace("_", "")), project_id
+        except (TypeError, ValueError):
+            return float("inf"), project_id
+
+    ordered_projects = sorted(weekly_counts.columns.tolist(), key=_project_sort_key)
+    weekly_counts = weekly_counts.reindex(columns=ordered_projects, fill_value=0)
+    color_map = project_color_map or {}
+    bar_width = pd.Timedelta(days=7)
+    half_bar = bar_width / 2
+    bar_width_ms = bar_width / pd.Timedelta(milliseconds=1)
+    week_positions = weekly_counts.index + half_bar
+
+    current_week_start = pd.Timestamp(date.today()).to_period("W-MON").start_time - pd.Timedelta(days=1)
+    current_week_end = current_week_start + bar_width
+    y_max = max(float(weekly_counts.sum(axis=1).max()), 1.0)
+    week_iso = current_week_start.isocalendar()
+    week_name = f"Current week — Week {week_iso.week:02d} ({week_iso.year}), starts {current_week_start.date()}"
+    fig.add_trace(
+        go.Scatter(
+            x=[current_week_start, current_week_end, current_week_end, current_week_start, current_week_start],
+            y=[0, 0, y_max, y_max, 0],
+            fill="toself",
+            fillcolor="rgba(200,200,200,0.48)",
+            line=dict(width=0),
+            mode="none",
+            hoveron="fills",
+            hovertemplate="%{fullData.name}<extra></extra>",
+            showlegend=False,
+            name=week_name,
+        ),
+        row=subplot_row,
+        col=1,
+    )
+
+    for project_id in ordered_projects:
+        counts = weekly_counts[project_id]
+        if counts.sum() == 0:
+            continue
+        hover_text = hover_map.get(project_id, f"<b>project_id</b>: {project_id}")
+        status_val = str(project_rows.loc[project_id].get("status", "Active")).strip() if project_id in project_rows.index else "Active"
+        bar_opacity = 0.5 if status_val.lower() != "active" else 1.0
+        fig.add_trace(
+            go.Bar(
+                x=week_positions,
+                y=counts.values,
+                name=project_id,
+                width=[bar_width_ms] * len(counts),
+                marker_color=color_map.get(project_id, BASE_BLACK),
+                opacity=bar_opacity,
+                hovertext=[hover_text] * len(counts),
+                hovertemplate="%{hovertext}<br>Week starting %{x|%Y-%m-%d}<br>Active=%{y}<extra></extra>",
+                showlegend=False,
+            ),
+            row=subplot_row,
+            col=1,
+        )
+
+    fig.update_yaxes(title_text="Active projects", row=subplot_row, col=1)
+    fig.update_xaxes(title_text="Week", row=subplot_row, col=1)
     fig.add_annotation(text=f"<b>{title}</b>", x=0, xref="x domain", y=1.12, yref=f"y{subplot_row} domain",
                        showarrow=False, align="left", row=subplot_row, col=1)
 
 
 def build_report_figure(projects_df: pd.DataFrame, time_entries_df: pd.DataFrame, export_date: str) -> go.Figure:
-    total_rows = 4
+    total_rows = 5
     _, project_color_map = build_color_maps(projects_df)
-    fig = make_subplots(rows=total_rows, cols=1, shared_xaxes=False, vertical_spacing=0.10)
+    fig = make_subplots(rows=total_rows, cols=1, shared_xaxes=False, vertical_spacing=0.08)
 
     add_stacked_project_count_bars(fig, projects_df, "programma", 1,
                                    "Projects per programma (stacked: each project = 1 block)",
                                    project_color_map)
-    add_stacked_project_count_bars(fig, projects_df, "requester", 2,
+    add_stacked_project_count_bars(fig, projects_df, "theme", 2,
+                                   "Projects per theme (stacked: each project = 1 block)",
+                                   project_color_map)
+    add_stacked_project_count_bars(fig, projects_df, "requester", 3,
                                    "Projects per requester (stacked: each project = 1 block)",
                                    project_color_map)
-    add_stacked_hours_bars(fig, projects_df, time_entries_df, "programma", 3,
+    add_stacked_hours_bars(fig, projects_df, time_entries_df, "programma", 4,
                            "Hours per programma (stacked: each project contributes its hours)",
                            project_color_map)
-    add_trend_started_closed(fig, projects_df, 4,
-                             "Trend: projects started vs closed per month")
+    add_trend_started_closed(fig, projects_df, 5,
+                             "Active projects per week (stacked by project)", project_color_map)
 
     apply_axis_style(fig, total_rows)
     fig.update_layout(
         barmode="stack",
-        height=1400,
+        height=1700,
         margin=dict(l=60, r=60, t=200, b=60),
-        title_text=f"Project Portfolio Overview — Rens<br><sup>Report generation date:{export_date}</sup>",
+        title_text=f"Project Portfolio Overview — Rens<br><sup>Report generation date: {export_date}</sup>",
         title_x=0.0,
         plot_bgcolor="rgba(255,255,255,1)",
         paper_bgcolor="rgba(250,250,250,1)",
@@ -760,13 +962,20 @@ def build_report_figure(projects_df: pd.DataFrame, time_entries_df: pd.DataFrame
 # ----------------------------
 # Export
 # ----------------------------
-def export_report(fig: go.Figure, output_dir: str, export_date: str) -> Tuple[str, str]:
-    base_name = f"{export_date}_project_report"
+def export_report(fig: go.Figure, output_dir: str, output_archive_dir: str, export_date: str) -> Tuple[str, str]:
+    base_name = f"project_report"
     html_path = os.path.join(output_dir, f"{base_name}.html")
     png_path = os.path.join(output_dir, f"{base_name}.png")
 
+    dated_base_name = f"{export_date}_project_report"
+    dated_html_path = os.path.join(output_archive_dir, f"{dated_base_name}.html")
+    dated_png_path = os.path.join(output_archive_dir, f"{dated_base_name}.png")
+
     fig.write_html(html_path, include_plotlyjs="cdn", full_html=True)
     fig.write_image(png_path, scale=2)  # requires kaleido
+
+    shutil.copyfile(html_path, dated_html_path)
+    shutil.copyfile(png_path, dated_png_path)
 
     return html_path, png_path
 
@@ -778,9 +987,14 @@ def main() -> None:
         raise SystemExit(f"No project folders found under: {PROJECTEN_DIR}")
 
     REPORT_DIR = os.path.join(os.path.dirname(SCRIPT_DIR), "Reports")
-    os.makedirs(REPORT_DIR, exist_ok=True)
+    REPORTS_ARCHIVE_DIR = os.path.join(os.path.dirname(SCRIPT_DIR), "Reports", "Archive")
+    os.makedirs(REPORTS_ARCHIVE_DIR, exist_ok=True)
+
+    projects_df.to_csv(os.path.join(REPORT_DIR, "projects_overview.csv"), index=False)
+    time_entries_df.to_csv(os.path.join(REPORT_DIR, "time_entries_df.csv"), index=False)
+
     fig = build_report_figure(projects_df, time_entries_df, export_date)
-    html_path, png_path = export_report(fig, REPORT_DIR, export_date)
+    html_path, png_path = export_report(fig, REPORT_DIR, REPORTS_ARCHIVE_DIR, export_date)
 
     print(f"Exported HTML: {html_path}")
     print(f"Exported PNG : {png_path}")
