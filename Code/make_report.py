@@ -51,6 +51,20 @@ from plotly.subplots import make_subplots
 # ----------------------------
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECTEN_DIR = os.path.normpath(os.path.join(SCRIPT_DIR, "..", "Projecten"))
+DUMMY_PROJECTEN_DIR = os.path.normpath(os.path.join(SCRIPT_DIR, "..", "DummyProjecten"))
+
+def has_subfolders(path: str) -> bool:
+    if not os.path.isdir(path):
+        return False
+    return any(
+        os.path.isdir(os.path.join(path, entry))
+        for entry in os.listdir(path)
+    )
+
+if not has_subfolders(PROJECTEN_DIR):
+    print('WARNING: No files found in "../Projecten/". Using DummyProjecten/ for testing purposes.')
+    PROJECTEN_DIR = DUMMY_PROJECTEN_DIR
+
 
 # ----------------------------
 # Warnings configuration
