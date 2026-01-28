@@ -452,17 +452,26 @@ def load_and_validate_projects(projecten_dir: str) -> Tuple[pd.DataFrame, pd.Dat
         project_row["target_end_date"] = parse_date(info.get("target_end_date"))
         project_row["actual_end_date"] = actual_end_date
 
+        project_row['programma(s)'] = project_row.get("programma (if multiple, separate by |)") or project_row.get("programma")
         programma_values = _split_pipe_values(project_row.get("programma (if multiple, separate by |)") or project_row.get("programma"))
         if programma_values:
             project_row["programma"] = programma_values[0]
             for idx, extra in enumerate(programma_values[1:], start=2):
                 project_row[f"programma{idx:02d}"] = extra
 
+        project_row['theme(s)'] = project_row.get("theme (if multiple, separate by |)") or project_row.get("theme")
         theme_values = _split_pipe_values(project_row.get("theme (if multiple, separate by |)") or project_row.get("theme"))
         if theme_values:
             project_row["theme"] = theme_values[0]
             for idx, extra in enumerate(theme_values[1:], start=2):
                 project_row[f"theme{idx:02d}"] = extra
+
+        project_row['requester(s)'] = project_row.get("requester(s) (if multiple, separate by |)") or project_row.get("requester")
+        requester_values = _split_pipe_values(project_row.get("requester(s) (if multiple, separate by |)") or project_row.get("requester"))
+        if requester_values:
+            project_row["requester"] = requester_values[0]
+            for idx, extra in enumerate(requester_values[1:], start=2):
+                project_row[f"requester{idx:02d}"] = extra
 
         # Next step #2: hours aggregation from time_log.xlsx
         if os.path.exists(time_log_path):
@@ -478,7 +487,6 @@ def load_and_validate_projects(projecten_dir: str) -> Tuple[pd.DataFrame, pd.Dat
                 time_df = time_df.copy()
                 time_df["project_id"] = derived_project_id
                 time_df["programma"] = str(project_row.get("programma", "Unknown") or "Unknown")
-                time_df["requester"] = str(project_row.get("requester", "Unknown") or "Unknown")
                 time_df["project_name"] = str(project_row.get("project_name", derived_project_id) or derived_project_id)
                 time_df["__project_folder"] = project_row["__project_folder"]
                 time_df["duration_hours"] = pd.to_numeric(time_df["duration_minutes"], errors="coerce") / 60.0
@@ -506,12 +514,12 @@ def load_and_validate_projects(projecten_dir: str) -> Tuple[pd.DataFrame, pd.Dat
 HOVER_KEYS = [
     "project_id",
     "project_name",
-    "programma",
-    "requester",
+    "programma(s)",
+    "requester(s)",
     "owner",
     "status",
     "priority",
-    "theme",
+    "theme(s)",
     "start_date",
     "target_end_date",
     "actual_end_date",
