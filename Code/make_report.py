@@ -665,6 +665,18 @@ def estimate_magnitude_weight(value: Any) -> int:
     return 30
 
 
+def build_period_week_grid(period_start: date, period_end: date) -> Tuple[pd.DatetimeIndex, pd.DatetimeIndex, pd.DatetimeIndex, float]:
+    start_week = period_start - timedelta(days=period_start.weekday())
+    end_week = period_end - timedelta(days=period_end.weekday())
+    week_starts = pd.date_range(pd.Timestamp(start_week), pd.Timestamp(end_week), freq="W-MON")
+    week_ends = week_starts + pd.Timedelta(days=6)
+    bar_width = pd.Timedelta(days=7)
+    half_bar = bar_width / 2
+    week_positions = week_starts + half_bar
+    bar_width_ms = bar_width / pd.Timedelta(milliseconds=1)
+    return week_starts, week_ends, week_positions, bar_width_ms
+
+
 # ----------------------------
 # NN_maandelijks helpers
 # ----------------------------
@@ -742,7 +754,7 @@ def load_nn_maandelijks_df() -> Tuple[Optional[pd.DataFrame], Optional[str], str
     if not path:
         return None, None, "NN_maandelijks file not found; skipping NN summaries."
     try:
-        df = pd.read_excel(path, sheet_name="NN_maandelijks")
+        df = pd.read_excel(path, sheet_name="NN_maandelijks", header=1)
     except Exception as exc:
         return None, path, f"Failed to read NN_maandelijks: {exc}"
     return df, path, f"NN_maandelijks loaded from {path}"
@@ -762,12 +774,8 @@ def compute_nn_summary(
     if df.empty:
         return None, "NN_maandelijks sheet is empty."
 
-    month_col = None
-    for col in df.columns:
-        if re.search(r"(maand|month)", str(col), re.IGNORECASE):
-            month_col = col
-            break
-    if not month_col:
+    month_col = 'Tabblad'
+    if not month_col in df.columns:
         month_col = df.columns[0]
 
     df["__month"] = df[month_col].apply(_parse_month_label)
@@ -783,55 +791,34 @@ def compute_nn_summary(
     row = row.iloc[0]
 
     cols = list(df.columns)
-    planned_month_col = _find_col(cols, ["uren", "maand"])
-    planned_cum_col = _find_col(cols, ["cumul"], exclude_tokens=["nn"])
-    nn_cum_col = _find_col(cols, ["nn", "cumul"])
-    nn_month_col = _find_col(cols, ["nn", "maand"])
+    billed_year_col = _find_col(cols, ["cumulatief"])
+    billed_month_col = _find_col(cols, ["uren per maand"])
     remaining_col = _find_col(cols, ["resterend"])
 
-    planned = None
-    nn_reported = None
+    billed = None
     remaining = None
 
     if period_type == "monthly":
-        if planned_month_col:
-            planned = _to_float(row.get(planned_month_col))
-        if nn_month_col:
-            nn_reported = _to_float(row.get(nn_month_col))
-        if nn_reported is None and nn_cum_col:
-            curr = _to_float(row.get(nn_cum_col))
-            prev_month = (target_month - pd.DateOffset(months=1)).normalize()
-            prev_row = df.loc[df["__month"] == prev_month]
-            prev = _to_float(prev_row.iloc[0].get(nn_cum_col)) if not prev_row.empty else 0.0
-            if curr is not None:
-                nn_reported = curr - (prev or 0.0)
+        if billed_month_col:
+            billed = _to_float(row.get(billed_month_col))
         if remaining_col:
             remaining = _to_float(row.get(remaining_col))
-        if remaining is None and planned is not None and nn_reported is not None:
-            remaining = planned - nn_reported
+
     else:  # yearly
-        if planned_cum_col:
-            planned = _to_float(row.get(planned_cum_col))
-        if nn_cum_col:
-            nn_reported = _to_float(row.get(nn_cum_col))
-        if nn_reported is None and nn_month_col:
-            upto = df.loc[df["__month"] <= target_month]
-            nn_reported = _to_float(upto[nn_month_col].sum()) if nn_month_col in upto.columns else None
+        if billed_year_col:
+            billed = _to_float(row.get(billed_year_col))
         if remaining_col:
             remaining = _to_float(row.get(remaining_col))
-        if remaining is None and planned is not None and nn_reported is not None:
-            remaining = planned - nn_reported
 
     project_logged_hours = float(time_entries_df_filtered["duration_hours"].sum()) if not time_entries_df_filtered.empty else 0.0
     completeness_ratio = None
-    if planned is not None and planned > 0:
-        completeness_ratio = project_logged_hours / planned
+    if billed is not None and billed > 0:
+        completeness_ratio = project_logged_hours / billed
 
     summary = dict(
         period_type=period_type,
         period_month=target_month,
-        planned=planned,
-        nn_reported=nn_reported,
+        billed=billed,
         remaining=remaining,
         project_logged_hours=project_logged_hours,
         completeness_ratio=completeness_ratio,
@@ -842,25 +829,48 @@ def compute_nn_summary(
 def build_nn_pie_html(nn_summary: Optional[Dict[str, Any]]) -> str:
     if not nn_summary:
         return ""
-    reported = nn_summary.get("nn_reported")
+    billed = nn_summary.get("billed")
     remaining = nn_summary.get("remaining")
-    if reported is None or remaining is None:
+    if billed is None or remaining is None:
         return ""
-    total = reported + remaining
+    total = billed + remaining
     if total <= 0:
         return ""
     fig = go.Figure(
         data=[
             go.Pie(
-                labels=["Reported", "Remaining"],
-                values=[reported, remaining],
+                labels=["Gefactureerd", "Resterend"],
+                values=[billed, remaining],
                 marker=dict(colors=[BASE_BLUE, BASE_YELLOW]),
                 hole=0.45,
-                textinfo="label+percent",
+                pull=[0.2,0.0],
+                texttemplate="%{value:.0f}<br>(%{percent})",
+                textposition="inside",
             )
         ]
     )
-    fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=180, width=180, showlegend=False)
+    center_text = f"{billed:.0f} / {total:.0f}"
+    fig.update_layout(
+        margin=dict(l=0, r=0, t=0, b=0),
+        height=140,
+        width=140,
+        showlegend=False,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        annotations=[
+            dict(
+                text=center_text,
+                x=0.5,
+                y=0.5,
+                xref="paper",
+                yref="paper",
+                showarrow=False,
+                font=dict(size=14, color=BASE_BLACK),
+                xanchor="center",
+                yanchor="middle",
+            ),
+        ],
+    )
     return pio.to_html(fig, include_plotlyjs=False, full_html=False, div_id="nn-pie")
 
 
@@ -869,27 +879,34 @@ def build_nn_metrics_html(nn_summary: Optional[Dict[str, Any]], note: Optional[s
         note_text = note or "NN summary not available."
         return f"<div class='nn-note'>{html.escape(note_text)}</div>"
 
-    planned = nn_summary.get("planned")
-    nn_reported = nn_summary.get("nn_reported")
+    billed = nn_summary.get("billed")
     remaining = nn_summary.get("remaining")
     logged = nn_summary.get("project_logged_hours")
     ratio = nn_summary.get("completeness_ratio")
+    period_type = nn_summary.get("period_type")
+    billed_label = "Billed (month)" if period_type == "monthly" else "Billed (ytd)"
 
     def fmt(val: Optional[float]) -> str:
         if val is None:
             return "n/a"
         return f"{val:.2f}"
 
-    ratio_text = f"{ratio * 100:.1f}%" if ratio is not None else "n/a"
+    ratio_text = f"{ratio * 100:.0f}%" if ratio is not None else "n/a"
     return (
         "<div class='nn-metrics'>"
-        "<div><b>Planned</b>: " + html.escape(fmt(planned)) + "</div>"
-        "<div><b>NN reported</b>: " + html.escape(fmt(nn_reported)) + "</div>"
+        "<div><b>" + html.escape(billed_label) + "</b>: " + html.escape(fmt(billed)) + "</div>"
         "<div><b>Remaining</b>: " + html.escape(fmt(remaining)) + "</div>"
         "<div><b>Project logged hours</b>: " + html.escape(fmt(logged)) + "</div>"
         "<div><b>Tracking completeness</b>: " + html.escape(ratio_text) + "</div>"
         "</div>"
     )
+
+
+def _plotly_cdn_src() -> str:
+    version = getattr(pio, "_plotlyjs_version", None)
+    if isinstance(version, str) and version.strip():
+        return f"https://cdn.plot.ly/plotly-{version}.min.js"
+    return "https://cdn.plot.ly/plotly-latest.min.js"
 
 
 def build_project_info_tables_html(
@@ -1325,11 +1342,19 @@ def add_hours_per_week(
     subplot_row: int,
     title: str,
     project_color_map: Optional[Dict[str, str]] = None,
-    target_year: Optional[int] = None,
+    display_start: Optional[date] = None,
+    display_end: Optional[date] = None,
+    data_start: Optional[date] = None,
+    data_end: Optional[date] = None,
 ) -> None:
-    if target_year is None:
-        target_year = date.today().year
-    week_starts, week_ends, week_positions, bar_width_ms = build_year_week_grid(target_year)
+    if display_start is None or display_end is None:
+        display_start = date.today().replace(month=1, day=1)
+        display_end = date.today()
+    if data_start is None:
+        data_start = display_start
+    if data_end is None:
+        data_end = display_end
+    week_starts, week_ends, week_positions, bar_width_ms = build_period_week_grid(display_start, display_end)
     x_positions = week_positions.to_pydatetime().tolist() if len(week_positions) else []
     if week_starts.empty:
         fig.add_trace(
@@ -1374,7 +1399,7 @@ def add_hours_per_week(
         return
 
     entries = time_entries_df.dropna(subset=["date", "duration_hours"]).copy()
-    entries = entries[(entries["date"] >= pd.Timestamp(date(target_year, 1, 1))) & (entries["date"] <= pd.Timestamp(date(target_year, 12, 31)))]
+    entries = entries[(entries["date"] >= pd.Timestamp(data_start)) & (entries["date"] <= pd.Timestamp(data_end))]
     if entries.empty:
         fig.add_trace(
             go.Scatter(x=[x_positions[0]] if x_positions else [], y=[0], mode="markers", marker_opacity=0, showlegend=False),
@@ -1396,7 +1421,7 @@ def add_hours_per_week(
         fig.update_xaxes(title_text="Week", row=subplot_row, col=1, type="date")
         return
 
-    entries["week"] = entries["date"].dt.to_period("W-SUN").dt.to_timestamp()
+    entries["week"] = entries["date"].dt.to_period("W-SUN").dt.to_timestamp() # @codex stop updating w-sun to w-mon, for some reason, w-sun sets the dates correctly to starting on mondays, whereas w-mon sets the dates to starting the week on tuesdays.
 
     weekly = (
         entries.groupby(["week", "project_id"], as_index=False)["duration_hours"]
@@ -1427,6 +1452,15 @@ def add_hours_per_week(
 
     weekly_hours = pd.crosstab(weekly["week"], weekly["project_id"], values=weekly["hours"], aggfunc="sum").fillna(0.0)
     weekly_hours = weekly_hours.reindex(week_starts, fill_value=0.0)
+
+    total_reported = float(entries["duration_hours"].sum())
+    total_plotted = float(weekly_hours.to_numpy().sum())
+    if abs(total_reported - total_plotted) > 0.01:
+        print(
+            f"WARNING: Reported hours mismatch in weekly plot. "
+            f"Reported={total_reported:.2f}, Plotted={total_plotted:.2f}, "
+            f"Diff={(total_reported - total_plotted):.2f}"
+        )
 
     project_rows = projects_df.drop_duplicates(subset=["project_id"]).copy()
     project_rows["project_id"] = project_rows["project_id"].astype(str)
@@ -1497,7 +1531,6 @@ def add_hours_per_week(
         added_trace = True
 
     if not added_trace:
-        print('DEBUGGING: No reported hours!')
         fig.add_trace(
             go.Scatter(x=[x_positions[0]] if x_positions else [], y=[0], mode="markers", marker_opacity=0, showlegend=False),
             row=subplot_row,
@@ -1527,12 +1560,14 @@ def add_estimated_magnitude_per_week(
     subplot_row: int,
     title: str,
     project_color_map: Optional[Dict[str, str]] = None,
-    target_year: Optional[int] = None,
+    period_start: Optional[date] = None,
+    period_end: Optional[date] = None,
 ) -> None:
-    if target_year is None:
-        target_year = date.today().year
-    year_end = date(target_year, 12, 31)
-    week_starts, week_ends, week_positions, bar_width_ms = build_year_week_grid(target_year)
+    if period_start is None or period_end is None:
+        period_start = date.today().replace(month=1, day=1)
+        period_end = date.today()
+    year_end = period_end
+    week_starts, week_ends, week_positions, bar_width_ms = build_period_week_grid(period_start, period_end)
     x_positions = week_positions.to_pydatetime().tolist() if len(week_positions) else []
     if week_starts.empty:
         fig.add_trace(
@@ -1552,7 +1587,7 @@ def add_estimated_magnitude_per_week(
             col=1,
         )
         fig.update_yaxes(title_text="Estimated magnitude", row=subplot_row, col=1)
-        fig.update_xaxes(title_text="Week", row=subplot_row, col=1)
+        fig.update_xaxes(title_text="Week", row=subplot_row, col=1, type="date")
         return
 
     project_rows = projects_df.dropna(subset=["start_date"]).copy()
@@ -1574,7 +1609,7 @@ def add_estimated_magnitude_per_week(
             col=1,
         )
         fig.update_yaxes(title_text="Estimated magnitude", row=subplot_row, col=1)
-        fig.update_xaxes(title_text="Week", row=subplot_row, col=1)
+        fig.update_xaxes(title_text="Week", row=subplot_row, col=1, type="date")
         return
 
     project_rows["project_id"] = project_rows["project_id"].astype(str)
@@ -1619,13 +1654,16 @@ def add_estimated_magnitude_per_week(
             alpha = 1.0 if status_val == "Active" else 0.25
 
         active = (week_ends >= project_start) & (week_starts <= project_end)
-        active_weeks = int(active.sum())
-        if active_weeks == 0:
+        total_week_start = project_start - pd.Timedelta(days=project_start.weekday())
+        total_week_end = project_end - pd.Timedelta(days=project_end.weekday())
+        total_weeks = pd.date_range(total_week_start, total_week_end, freq="W-MON")
+        total_active_weeks = len(total_weeks)
+        if total_active_weeks == 0:
             continue
 
         magnitude_value = row.get("estimated_magnitude")
         weight = estimate_magnitude_weight(magnitude_value)
-        per_week = weight / active_weeks
+        per_week = weight / total_active_weeks
         y_vals = [per_week if is_active else 0.0 for is_active in active.tolist()]
 
         base_color = color_map.get(project_id, BASE_BLACK)
@@ -1666,13 +1704,135 @@ def add_estimated_magnitude_per_week(
     )
 
 
+def add_reported_hours_per_project(
+    fig: go.Figure,
+    projects_df: pd.DataFrame,
+    time_entries_df: pd.DataFrame,
+    subplot_row: int,
+    title: str,
+    project_color_map: Optional[Dict[str, str]] = None,
+) -> None:
+    if time_entries_df.empty or "duration_hours" not in time_entries_df.columns:
+        fig.add_trace(
+            go.Bar(x=["(no reported hours)"], y=[0], hovertemplate="No reported hours data.<extra></extra>", showlegend=False),
+            row=subplot_row,
+            col=1,
+        )
+        fig.update_yaxes(title_text="Hours", row=subplot_row, col=1)
+        fig.add_annotation(
+            text=f"<b>{title}</b>",
+            x=0,
+            xref="x domain",
+            y=1.12,
+            yref=axis_domain_ref("y", subplot_row),
+            showarrow=False,
+            align="left",
+            row=subplot_row,
+            col=1,
+        )
+        return
+
+    hours_by_project = (
+        time_entries_df.groupby("project_id", as_index=False)["duration_hours"]
+        .sum()
+        .rename(columns={"duration_hours": "total_hours"})
+    )
+    if hours_by_project.empty:
+        fig.add_trace(
+            go.Bar(x=["(no reported hours)"], y=[0], hovertemplate="No reported hours data.<extra></extra>", showlegend=False),
+            row=subplot_row,
+            col=1,
+        )
+        fig.update_yaxes(title_text="Hours", row=subplot_row, col=1)
+        fig.add_annotation(
+            text=f"<b>{title}</b>",
+            x=0,
+            xref="x domain",
+            y=1.12,
+            yref=axis_domain_ref("y", subplot_row),
+            showarrow=False,
+            align="left",
+            row=subplot_row,
+            col=1,
+        )
+        return
+
+    hours_by_project["project_id"] = hours_by_project["project_id"].astype(str)
+    project_rows = projects_df.copy()
+    project_rows["project_id"] = project_rows["project_id"].astype(str)
+    merged = project_rows.merge(hours_by_project, on="project_id", how="right")
+    merged = merged[merged["total_hours"] > 0].copy()
+
+    if merged.empty:
+        fig.add_trace(
+            go.Bar(x=["(no reported hours)"], y=[0], hovertemplate="No reported hours data.<extra></extra>", showlegend=False),
+            row=subplot_row,
+            col=1,
+        )
+        fig.update_yaxes(title_text="Hours", row=subplot_row, col=1)
+        fig.add_annotation(
+            text=f"<b>{title}</b>",
+            x=0,
+            xref="x domain",
+            y=1.12,
+            yref=axis_domain_ref("y", subplot_row),
+            showarrow=False,
+            align="left",
+            row=subplot_row,
+            col=1,
+        )
+        return
+
+    merged = merged.sort_values("total_hours", ascending=False)
+    labels: List[str] = []
+    colors: List[str] = []
+    hovers: List[str] = []
+    hours: List[float] = []
+    color_map = project_color_map or {}
+
+    for _, row in merged.iterrows():
+        project_id = str(row.get("project_id", "")).strip()
+        project_name = str(row.get("project_name", project_id)).strip()
+        label = f"{project_name} ({project_id})" if project_name else project_id
+        labels.append(label)
+        hours.append(float(row.get("total_hours", 0.0)))
+        colors.append(color_map.get(project_id, BASE_BLACK))
+        hovers.append(build_hover_text(row, extra={"total_hours": f"{row.get('total_hours', 0.0):.2f}"}))
+
+    fig.add_trace(
+        go.Bar(
+            x=labels,
+            y=hours,
+            marker_color=colors,
+            hovertext=hovers,
+            hovertemplate="%{hovertext}<br>Total hours=%{y:.2f}<extra></extra>",
+            showlegend=False,
+        ),
+        row=subplot_row,
+        col=1,
+    )
+    fig.update_xaxes(categoryorder="array", categoryarray=labels, row=subplot_row, col=1)
+    fig.update_yaxes(title_text="Hours", row=subplot_row, col=1)
+    fig.add_annotation(
+        text=f"<b>{title}</b>",
+        x=0,
+        xref="x domain",
+        y=1.12,
+        yref=axis_domain_ref("y", subplot_row),
+        showarrow=False,
+        align="left",
+        row=subplot_row,
+        col=1,
+    )
+
+
 def add_nn_summary_bars(
     fig: go.Figure,
     nn_summary: Optional[Dict[str, Any]],
     subplot_row: int,
     title: str,
 ) -> None:
-    if not nn_summary or nn_summary.get("nn_reported") is None or nn_summary.get("remaining") is None:
+    if not nn_summary or nn_summary.get("billed") is None or nn_summary.get("remaining") is None:
         fig.add_trace(
             go.Bar(x=["NN summary unavailable"], y=[0], hovertemplate="No NN summary available.<extra></extra>", showlegend=False),
             row=subplot_row,
@@ -1692,15 +1852,15 @@ def add_nn_summary_bars(
         )
         return
 
-    reported = float(nn_summary.get("nn_reported", 0.0))
+    billed = float(nn_summary.get("billed", 0.0))
     remaining = float(nn_summary.get("remaining", 0.0))
     fig.add_trace(
-        go.Bar(x=["Reported"], y=[reported], marker_color=BASE_BLUE, showlegend=False),
+        go.Bar(x=["Gefactureerd"], y=[billed], marker_color=BASE_BLUE, showlegend=False),
         row=subplot_row,
         col=1,
     )
     fig.add_trace(
-        go.Bar(x=["Remaining"], y=[remaining], marker_color=BASE_YELLOW, showlegend=False),
+        go.Bar(x=["Resterend"], y=[remaining], marker_color=BASE_YELLOW, showlegend=False),
         row=subplot_row,
         col=1,
     )
@@ -1773,11 +1933,19 @@ def build_hours_figure(
     period_start: date,
     period_end: date,
     period_label: str,
-    target_year: Optional[int] = None,
+    report_type: str,
 ) -> go.Figure:
-    total_rows = 5
+    if report_type == "weekly":
+        total_rows = 4
+    else:
+        total_rows = 6
     _, project_color_map = build_color_maps(projects_df)
     fig = make_subplots(rows=total_rows, cols=1, shared_xaxes=False, vertical_spacing=0.08)
+
+    display_start = period_start
+    display_end = period_end
+    if report_type == "yearly":
+        display_end = date(period_start.year, 12, 31)
 
     add_stacked_hours_bars(fig, projects_df, time_entries_df_filtered, "programma", 1,
                            "Hours per programma (stacked: each project contributes its hours)",
@@ -1788,17 +1956,44 @@ def build_hours_figure(
     add_stacked_hours_bars(fig, projects_df, time_entries_df_filtered, "requester", 3,
                            "Hours per requester (stacked: each project contributes its hours)",
                            project_color_map)
-    add_estimated_magnitude_per_week(fig, projects_df, 4,
-                                     "Estimated magnitude per week (stacked by project)",
-                                     project_color_map, target_year=target_year)
-    add_hours_per_week(fig, projects_df, time_entries_df_filtered, 5,
-                       "Reported hours per week (stacked by project)",
-                       project_color_map, target_year=target_year)
+    if report_type == "weekly":
+        add_reported_hours_per_project(fig, projects_df, time_entries_df_filtered, 4,
+                                       "Reported hours per project", project_color_map)
+    else:
+        add_estimated_magnitude_per_week(
+            fig,
+            projects_df,
+            4,
+            "Estimated magnitude per week (stacked by project)",
+            project_color_map,
+            period_start=display_start,
+            period_end=display_end,
+        )
+        add_hours_per_week(
+            fig,
+            projects_df,
+            time_entries_df_filtered,
+            5,
+            "Reported hours per week (stacked by project)",
+            project_color_map,
+            display_start=display_start,
+            display_end=display_end,
+            data_start=period_start,
+            data_end=period_end,
+        )
+        add_reported_hours_per_project(
+            fig,
+            projects_df,
+            time_entries_df_filtered,
+            6,
+            "Reported hours per project",
+            project_color_map,
+        )
 
     apply_axis_style(fig, total_rows)
     fig.update_layout(
         barmode="stack",
-        height=1750,
+        height=1400 if report_type == "weekly" else 2050,
         margin=dict(l=60, r=60, t=40, b=60),
         plot_bgcolor="rgba(255,255,255,1)",
         paper_bgcolor="rgba(250,250,250,1)",
@@ -1821,8 +2016,9 @@ def write_tabbed_html(
     nn_pie_html: str,
     nn_note: Optional[str],
 ) -> None:
-    counts_html = pio.to_html(counts_fig, include_plotlyjs="cdn", full_html=False, div_id="counts-fig")
+    counts_html = pio.to_html(counts_fig, include_plotlyjs=False, full_html=False, div_id="counts-fig")
     hours_html = pio.to_html(hours_fig, include_plotlyjs=False, full_html=False, div_id="hours-fig")
+    plotly_cdn = _plotly_cdn_src()
 
     title_text = html.escape(str(header_context.get("title_text", "Project Portfolio Overview")))
     export_date = html.escape(str(header_context.get("export_date", "")))
@@ -1835,6 +2031,14 @@ def write_tabbed_html(
     profile_img_html = f"<img class='profile-img' src='{profile_uri}' alt='Profile'/>" if profile_uri else ""
     teamnl_img_html = f"<img class='teamnl-img' src='{teamnl_uri}' alt='TeamNL'/>" if teamnl_uri else ""
     nn_note_html = f"<div class='nn-note'>{html.escape(nn_note)}</div>" if nn_note else ""
+    nn_pie_block_html = (
+        "<div class='nn-pie-block'>"
+        "<div class='nn-pie-title'>Billed (to date)<br>vs remaining</div>"
+        f"{nn_pie_html}"
+        "</div>"
+        if nn_pie_html
+        else ""
+    )
 
     html_content = f"""<!doctype html>
 <html lang="en">
@@ -1842,6 +2046,7 @@ def write_tabbed_html(
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>{title_text}</title>
+  <script src="{plotly_cdn}"></script>
   <style>
     body {{
       font-family: "Segoe UI", Tahoma, sans-serif;
@@ -1880,6 +2085,18 @@ def write_tabbed_html(
       display: flex;
       gap: 16px;
       align-items: center;
+    }}
+    .nn-pie-block {{
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }}
+    .nn-pie-title {{
+      writing-mode: vertical-rl;
+      transform: rotate(180deg);
+      font-size: 12px;
+      color: #111;
+      white-space: nowrap;
     }}
     .profile-img {{
       width: 120px;
@@ -1986,9 +2203,9 @@ def write_tabbed_html(
           {nn_note_html}
         </div>
         <div class="header-right">
+          {nn_pie_block_html}
           {teamnl_img_html}
-          {profile_img_html}
-          {nn_pie_html}
+          {profile_img_html}          
         </div>
       </div>
 
@@ -2171,7 +2388,7 @@ def generate_reports(report_type: str, asof_date: date) -> None:
             period_start,
             period_end,
             period_label,
-            target_year=timeline_year,
+            report_type=rtype,
         )
 
         period_range = f"{period_start.isoformat()} to {period_end.isoformat()}"
