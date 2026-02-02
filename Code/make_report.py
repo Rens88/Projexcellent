@@ -650,6 +650,7 @@ def add_stacked_project_count_bars(
 ) -> None:
     all_groups: set[str] = set()
     project_groups: List[Tuple[pd.Series, List[str]]] = []
+    group_counts: Dict[str, int] = {}
 
     for _, project in projects_df.iterrows():
         values = extract_group_values(project, group_col)
@@ -658,8 +659,10 @@ def add_stacked_project_count_bars(
         values = list(dict.fromkeys(values))  # preserve order, drop dupes
         project_groups.append((project, values))
         all_groups.update(values)
+        for group_val in values:
+            group_counts[group_val] = group_counts.get(group_val, 0) + 1
 
-    groups = sorted(all_groups)
+    groups = sorted(all_groups, key=lambda g: (-group_counts.get(g, 0), str(g)))
     fig.update_xaxes(categoryorder="array", categoryarray=groups, row=subplot_row, col=1)
 
     for project, values in project_groups:
@@ -733,6 +736,7 @@ def add_stacked_hours_bars(
 
     all_groups: set[str] = set()
     project_groups: List[Tuple[pd.Series, List[str]]] = []
+    group_hours: Dict[str, float] = {}
 
     for _, project in merged.iterrows():
         values = extract_group_values(project, group_col)
@@ -741,8 +745,11 @@ def add_stacked_hours_bars(
         values = list(dict.fromkeys(values))
         project_groups.append((project, values))
         all_groups.update(values)
+        hours = float(project.get("total_hours", 0.0))
+        for group_val in values:
+            group_hours[group_val] = group_hours.get(group_val, 0.0) + hours
 
-    groups = sorted(all_groups)
+    groups = sorted(all_groups, key=lambda g: (-group_hours.get(g, 0.0), str(g)))
     fig.update_xaxes(categoryorder="array", categoryarray=groups, row=subplot_row, col=1)
 
     for project, values in project_groups:
