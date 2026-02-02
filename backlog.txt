@@ -1,10 +1,36 @@
+**FUTURE**
+IETS MET
+- Overlopen of niet: Zit ik aan m'n max of is er ruimte
+- Niet uren, maar percentage van de week
+
+
+-- 
 Ideetjes om rapportage te verbeteren:
+-> prioritering printen zodat ik weet waar ik aan moet werken?
 
-- Splits rapportage op in: maak jaar-rapportage en maak maand-rapportage (gebruik tabblad NN_maandelijks in Excel DSA overzicht)
+**IN PROGRESS**
+TASK 1 - Fixate the header of the html (up until the Counts and Hours button) so that when scrolling down that header remains visible.
+TASK 2 - The "Timeseries" plot still doesn't work for the "Hours" tab. It seems completely broken. Restore the Timeseries plot under the hours tab. I want to make two versions. One should be fairly similar to the Count variant, but instead of sizing each project as "1", each project should be sized based on "estimated_magnitude" in "project_info". Sizing should be:
+1	Small (< 6 hrs)
+3	Medium (6-24 hrs)
+8	Substantial (24-160 hrs)
+16	Large (160-320 hrs)
+30	Enormous (320+ hrs)
 
-- Gefactureerde uren zichtbaar maken per maand
-- Verschil gefactureerde en gerapporteerde uren zichtbaar maken als "unassigned"
--> Hours per programma opvullen met unassigned uren (schatting)?
+where the number  should be divided by the number of weeks that the project is (planned to be) active for.
+The second timeseries plot should size each block by multiplying 1 with the number of hours that were actually reported for that project during that week..
+
+
+
+
+DONE -> Maak een weekrapport 
+TASK 3	- Add a tabular display of the logged hours for that week aggregated by project sorted by the project on which I spent the most hours. Show each of the entries for that project:
+	project 1 12 hours total
+	- entry 1: 3 hours, worked on this and this (just take the info from time_log.xlsx)
+	- entry 2: 2 hours, worked on that and that
+	
+-> Maak een maandrapport (dat inhaakt op 't tabblad NN_maandelijks in 't uren overzicht zodat de ongespecificeerde uren zichtbaar zijn en hoeveel uur er nog resteert voor 't jaar)
+-> Maak een jaarrapport / tot-nu-toe rapport met een tijdslijn
 
 - Gefactureerde uren uitdrukken als percentage gewerkte uren
 - Tot nu toe gefactueerde uren uitdrukken als percentage beschikbare uren
@@ -18,6 +44,10 @@ Rapportage:
 
 Onderaan een overzicht van alle projecten (tabelletjes: links project info en rechts de meest recente entries)
 
-
 Over tijd plot:
 - Alleen actieve projecten volle kleur
+
+**DONE**
+- Let the Hours overview show the same plots (but then of course with hours on the vertical axis) as the Counts overview. Keep the sizing and order the same too.
+- The counts overview in the weekly report shows all projects. instead, only show projects for which hours have been written up in that week. Same for the monthly report.
+- The "Timeseries" plot broke. The "Active projects per week" should show a timeline

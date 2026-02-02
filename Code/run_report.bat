@@ -34,14 +34,15 @@ echo Installing requirements (this may take a moment)...
 python -m pip install -r requirements.txt --quiet || goto :fail
 
 echo Running report...
-python make_report.py || goto :fail
+python make_report.py --report-type all || goto :fail
 
 echo.
 echo =====================================
 echo FINISHED SUCCESSFULLY
 echo Check the Reports folder for:
-echo   YYYY-MM-DD_project_report.html
-echo   YYYY-MM-DD_project_report.png
+echo   project_report_yearly.html
+echo   project_report_monthly_YYYY-MM.html
+echo   project_report_weekly_YYYY-Www.html
 echo =====================================
 goto :end
 

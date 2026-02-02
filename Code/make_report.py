@@ -33,16 +33,20 @@ pip install pandas openpyxl plotly kaleido
 
 from __future__ import annotations
 
-import shutil
+import argparse
 import base64
+import html
 import os
+import re
+import shutil
 import warnings
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.io as pio
 from plotly.subplots import make_subplots
 
 
@@ -52,6 +56,10 @@ from plotly.subplots import make_subplots
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECTEN_DIR = os.path.normpath(os.path.join(SCRIPT_DIR, "..", "Projecten"))
 DUMMY_PROJECTEN_DIR = os.path.normpath(os.path.join(SCRIPT_DIR, "..", "DummyProjecten"))
+NN_MAANDELIJKS_PATHS = [
+    r"C:\Users\rmeer\Dropbox\Public\DataScienceAgency\Admin\Uren\2026_DSA_invulsheet_uren_en_declaraties.xlsx",
+    "/mnt/c/Users/rmeer/Dropbox/Public/DataScienceAgency/Admin/Uren/2026_DSA_invulsheet_uren_en_declaraties.xlsx",
+]
 
 def has_subfolders(path: str) -> bool:
     if not os.path.isdir(path):
@@ -131,6 +139,14 @@ def adjust_color_luminance(hex_color: str, factor: float) -> str:
         b = _clamp_channel(b * (1 + factor))
 
     return f"#{r:02X}{g:02X}{b:02X}"
+
+
+def hex_to_rgba(hex_color: str, alpha: float) -> str:
+    color = hex_color.lstrip("#")
+    if len(color) != 6:
+        return f"rgba(0,0,0,{alpha})"
+    r, g, b = int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
 
 
 def build_color_maps(projects_df: pd.DataFrame) -> Tuple[Dict[str, str], Dict[str, str]]:
@@ -401,14 +417,16 @@ class ProjectRecord:
 # ----------------------------
 # Load + validate projects
 # ----------------------------
-def load_and_validate_projects(projecten_dir: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def load_and_validate_projects(projecten_dir: str) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Dict[str, Any]]]:
     """
     Returns:
       projects_df: one row per project (metadata)
       time_entries_df: one row per time log entry (enriched with project fields)
+      project_info_map: project_id -> raw project_info.xlsx key/value dict
     """
     project_rows: List[Dict[str, Any]] = []
     all_time_entries: List[pd.DataFrame] = []
+    project_info_map: Dict[str, Dict[str, Any]] = {}
 
     for folder_path in discover_project_folders(projecten_dir):
         folder_name = os.path.basename(folder_path)
@@ -421,6 +439,7 @@ def load_and_validate_projects(projecten_dir: str) -> Tuple[pd.DataFrame, pd.Dat
             raise FileNotFoundError(f"Missing project_info.xlsx in project folder '{folder_name}'")
 
         info = read_project_info_kv_from_xlsx(project_info_path)
+        project_info_map[derived_project_id] = dict(info)
 
         # Requirement: derived project id must match project_info.xlsx project_id
         info_project_id = str(info.get("project_id", "")).strip()
@@ -504,8 +523,9 @@ def load_and_validate_projects(projecten_dir: str) -> Tuple[pd.DataFrame, pd.Dat
     time_entries_df = pd.concat(all_time_entries, ignore_index=True) if all_time_entries else pd.DataFrame()
 
     projects_df = projects_df.sort_values(["created_at"]).reset_index(drop=True)
-    time_entries_df = time_entries_df.sort_values(["Date*"]).reset_index(drop=True)
-    return projects_df, time_entries_df
+    if not time_entries_df.empty and "Date*" in time_entries_df.columns:
+        time_entries_df = time_entries_df.sort_values(["Date*"]).reset_index(drop=True)
+    return projects_df, time_entries_df, project_info_map
 
 
 # ----------------------------
@@ -538,6 +558,371 @@ def build_hover_text(project_row: pd.Series, extra: Optional[Dict[str, Any]] = N
             if v is not None and str(v).strip() != "":
                 parts.append(f"<b>{k}</b>: {v}")
     return "<br>".join(parts)
+
+
+# ----------------------------
+# Period helpers
+# ----------------------------
+def _last_completed_month(asof_date: date) -> Tuple[date, date, str]:
+    first_of_month = date(asof_date.year, asof_date.month, 1)
+    last_day_prev = first_of_month - timedelta(days=1)
+    period_start = date(last_day_prev.year, last_day_prev.month, 1)
+    period_end = last_day_prev
+    period_key = f"{period_end.year:04d}-{period_end.month:02d}"
+    return period_start, period_end, period_key
+
+
+def _last_completed_iso_week(asof_date: date) -> Tuple[date, date, str]:
+    last_sunday = asof_date - timedelta(days=asof_date.weekday() + 1)
+    period_start = last_sunday - timedelta(days=6)
+    period_end = last_sunday
+    iso = period_end.isocalendar()
+    period_key = f"{iso.year}-W{iso.week:02d}"
+    return period_start, period_end, period_key
+
+
+def compute_report_periods(asof_date: date) -> Dict[str, Dict[str, Any]]:
+    monthly_start, monthly_end, month_key = _last_completed_month(asof_date)
+    weekly_start, weekly_end, week_key = _last_completed_iso_week(asof_date)
+    yearly_start = date(monthly_end.year, 1, 1)
+    yearly_end = monthly_end
+    year_key = f"{yearly_end.year:04d}"
+    return {
+        "weekly": dict(label="Weekly report", start=weekly_start, end=weekly_end, key=week_key),
+        "monthly": dict(label="Monthly report", start=monthly_start, end=monthly_end, key=month_key),
+        "yearly": dict(label="Yearly report", start=yearly_start, end=yearly_end, key=year_key),
+    }
+
+
+def filter_time_entries_by_period(time_entries_df: pd.DataFrame, period_start: date, period_end: date) -> pd.DataFrame:
+    if time_entries_df.empty or "date" not in time_entries_df.columns:
+        return time_entries_df.copy()
+    mask = (time_entries_df["date"] >= pd.Timestamp(period_start)) & (time_entries_df["date"] <= pd.Timestamp(period_end))
+    return time_entries_df.loc[mask].copy()
+
+
+def filter_projects_with_hours(
+    projects_df: pd.DataFrame, time_entries_df_filtered: pd.DataFrame
+) -> pd.DataFrame:
+    if time_entries_df_filtered.empty or "project_id" not in time_entries_df_filtered.columns:
+        return projects_df.iloc[0:0].copy()
+    hours_by_project = (
+        time_entries_df_filtered.groupby("project_id")["duration_hours"]
+        .sum(min_count=1)
+        .fillna(0.0)
+    )
+    valid_ids = {str(pid) for pid, hours in hours_by_project.items() if hours > 0}
+    if not valid_ids:
+        return projects_df.iloc[0:0].copy()
+    mask = projects_df["project_id"].astype(str).isin(valid_ids)
+    return projects_df.loc[mask].copy()
+
+
+def build_year_week_grid(target_year: int) -> Tuple[pd.DatetimeIndex, pd.DatetimeIndex, pd.DatetimeIndex, float]:
+    year_start = date(target_year, 1, 1)
+    year_end = date(target_year, 12, 31)
+    week_starts = pd.date_range(pd.Timestamp(year_start), pd.Timestamp(year_end), freq="W-MON")
+    week_ends = week_starts + pd.Timedelta(days=6)
+    bar_width = pd.Timedelta(days=7)
+    half_bar = bar_width / 2
+    week_positions = week_starts + half_bar
+    bar_width_ms = bar_width / pd.Timedelta(milliseconds=1)
+    return week_starts, week_ends, week_positions, bar_width_ms
+
+
+def estimate_magnitude_weight(value: Any) -> int:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return 1
+    if isinstance(value, (int, float)):
+        hours = float(value)
+    else:
+        s = str(value).strip().lower()
+        if not s:
+            return 1
+        if any(k in s for k in ["small", "klein"]):
+            return 1
+        if "medium" in s:
+            return 3
+        if "substantial" in s:
+            return 8
+        if "large" in s or "groot" in s:
+            return 16
+        if "enormous" in s or "enorm" in s:
+            return 30
+        try:
+            hours = float(re.sub(r"[^\d.]+", "", s))
+        except ValueError:
+            return 1
+
+    if hours < 6:
+        return 1
+    if hours < 24:
+        return 3
+    if hours < 160:
+        return 8
+    if hours < 320:
+        return 16
+    return 30
+
+
+# ----------------------------
+# NN_maandelijks helpers
+# ----------------------------
+_MONTH_MAP = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
+
+
+def _clean_colname(name: str) -> str:
+    return re.sub(r"\s+", " ", str(name)).strip().lower()
+
+
+def _find_col(cols: List[str], include_tokens: List[str], exclude_tokens: Optional[List[str]] = None) -> Optional[str]:
+    exclude_tokens = exclude_tokens or []
+    for col in cols:
+        norm = _clean_colname(col)
+        if all(tok in norm for tok in include_tokens) and not any(tok in norm for tok in exclude_tokens):
+            return col
+    return None
+
+
+def _to_float(val: Any) -> Optional[float]:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_month_label(val: Any) -> Optional[pd.Timestamp]:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    if isinstance(val, (pd.Timestamp, datetime, date)):
+        return pd.Timestamp(val.year, val.month, 1)
+    s = str(val).strip()
+    if not s:
+        return None
+    ts = pd.to_datetime(s, errors="coerce")
+    if not pd.isna(ts):
+        return pd.Timestamp(ts.year, ts.month, 1)
+    cleaned = re.sub(r"[^A-Za-z0-9]", "", s).lower()
+    m = re.match(r"([a-z]{3,9})(\d{4})", cleaned)
+    if m and m.group(1)[:3] in _MONTH_MAP:
+        return pd.Timestamp(int(m.group(2)), _MONTH_MAP[m.group(1)[:3]], 1)
+    m = re.match(r"(\d{4})(\d{1,2})", cleaned)
+    if m:
+        year = int(m.group(1))
+        month = int(m.group(2))
+        if 1 <= month <= 12:
+            return pd.Timestamp(year, month, 1)
+    return None
+
+
+def _find_nn_maandelijks_path() -> Optional[str]:
+    for path in NN_MAANDELIJKS_PATHS:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def load_nn_maandelijks_df() -> Tuple[Optional[pd.DataFrame], Optional[str], str]:
+    path = _find_nn_maandelijks_path()
+    if not path:
+        return None, None, "NN_maandelijks file not found; skipping NN summaries."
+    try:
+        df = pd.read_excel(path, sheet_name="NN_maandelijks")
+    except Exception as exc:
+        return None, path, f"Failed to read NN_maandelijks: {exc}"
+    return df, path, f"NN_maandelijks loaded from {path}"
+
+
+def compute_nn_summary(
+    nn_df: Optional[pd.DataFrame],
+    period_type: str,
+    period_end: date,
+    time_entries_df_filtered: pd.DataFrame,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    if nn_df is None or nn_df.empty:
+        return None, "NN_maandelijks data not available."
+
+    df = nn_df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    if df.empty:
+        return None, "NN_maandelijks sheet is empty."
+
+    month_col = None
+    for col in df.columns:
+        if re.search(r"(maand|month)", str(col), re.IGNORECASE):
+            month_col = col
+            break
+    if not month_col:
+        month_col = df.columns[0]
+
+    df["__month"] = df[month_col].apply(_parse_month_label)
+    df = df.dropna(subset=["__month"]).copy()
+    if df.empty:
+        return None, "No month rows found in NN_maandelijks."
+
+    df = df.sort_values("__month")
+    target_month = pd.Timestamp(period_end.year, period_end.month, 1)
+    row = df.loc[df["__month"] == target_month]
+    if row.empty:
+        return None, f"No NN_maandelijks row found for {target_month.date().isoformat()}."
+    row = row.iloc[0]
+
+    cols = list(df.columns)
+    planned_month_col = _find_col(cols, ["uren", "maand"])
+    planned_cum_col = _find_col(cols, ["cumul"], exclude_tokens=["nn"])
+    nn_cum_col = _find_col(cols, ["nn", "cumul"])
+    nn_month_col = _find_col(cols, ["nn", "maand"])
+    remaining_col = _find_col(cols, ["resterend"])
+
+    planned = None
+    nn_reported = None
+    remaining = None
+
+    if period_type == "monthly":
+        if planned_month_col:
+            planned = _to_float(row.get(planned_month_col))
+        if nn_month_col:
+            nn_reported = _to_float(row.get(nn_month_col))
+        if nn_reported is None and nn_cum_col:
+            curr = _to_float(row.get(nn_cum_col))
+            prev_month = (target_month - pd.DateOffset(months=1)).normalize()
+            prev_row = df.loc[df["__month"] == prev_month]
+            prev = _to_float(prev_row.iloc[0].get(nn_cum_col)) if not prev_row.empty else 0.0
+            if curr is not None:
+                nn_reported = curr - (prev or 0.0)
+        if remaining_col:
+            remaining = _to_float(row.get(remaining_col))
+        if remaining is None and planned is not None and nn_reported is not None:
+            remaining = planned - nn_reported
+    else:  # yearly
+        if planned_cum_col:
+            planned = _to_float(row.get(planned_cum_col))
+        if nn_cum_col:
+            nn_reported = _to_float(row.get(nn_cum_col))
+        if nn_reported is None and nn_month_col:
+            upto = df.loc[df["__month"] <= target_month]
+            nn_reported = _to_float(upto[nn_month_col].sum()) if nn_month_col in upto.columns else None
+        if remaining_col:
+            remaining = _to_float(row.get(remaining_col))
+        if remaining is None and planned is not None and nn_reported is not None:
+            remaining = planned - nn_reported
+
+    project_logged_hours = float(time_entries_df_filtered["duration_hours"].sum()) if not time_entries_df_filtered.empty else 0.0
+    completeness_ratio = None
+    if planned is not None and planned > 0:
+        completeness_ratio = project_logged_hours / planned
+
+    summary = dict(
+        period_type=period_type,
+        period_month=target_month,
+        planned=planned,
+        nn_reported=nn_reported,
+        remaining=remaining,
+        project_logged_hours=project_logged_hours,
+        completeness_ratio=completeness_ratio,
+    )
+    return summary, None
+
+
+def build_nn_pie_html(nn_summary: Optional[Dict[str, Any]]) -> str:
+    if not nn_summary:
+        return ""
+    reported = nn_summary.get("nn_reported")
+    remaining = nn_summary.get("remaining")
+    if reported is None or remaining is None:
+        return ""
+    total = reported + remaining
+    if total <= 0:
+        return ""
+    fig = go.Figure(
+        data=[
+            go.Pie(
+                labels=["Reported", "Remaining"],
+                values=[reported, remaining],
+                marker=dict(colors=[BASE_BLUE, BASE_YELLOW]),
+                hole=0.45,
+                textinfo="label+percent",
+            )
+        ]
+    )
+    fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=180, width=180, showlegend=False)
+    return pio.to_html(fig, include_plotlyjs=False, full_html=False, div_id="nn-pie")
+
+
+def build_nn_metrics_html(nn_summary: Optional[Dict[str, Any]], note: Optional[str]) -> str:
+    if not nn_summary:
+        note_text = note or "NN summary not available."
+        return f"<div class='nn-note'>{html.escape(note_text)}</div>"
+
+    planned = nn_summary.get("planned")
+    nn_reported = nn_summary.get("nn_reported")
+    remaining = nn_summary.get("remaining")
+    logged = nn_summary.get("project_logged_hours")
+    ratio = nn_summary.get("completeness_ratio")
+
+    def fmt(val: Optional[float]) -> str:
+        if val is None:
+            return "n/a"
+        return f"{val:.2f}"
+
+    ratio_text = f"{ratio * 100:.1f}%" if ratio is not None else "n/a"
+    return (
+        "<div class='nn-metrics'>"
+        "<div><b>Planned</b>: " + html.escape(fmt(planned)) + "</div>"
+        "<div><b>NN reported</b>: " + html.escape(fmt(nn_reported)) + "</div>"
+        "<div><b>Remaining</b>: " + html.escape(fmt(remaining)) + "</div>"
+        "<div><b>Project logged hours</b>: " + html.escape(fmt(logged)) + "</div>"
+        "<div><b>Tracking completeness</b>: " + html.escape(ratio_text) + "</div>"
+        "</div>"
+    )
+
+
+def build_project_info_tables_html(
+    projects_df: pd.DataFrame, project_info_map: Dict[str, Dict[str, Any]]
+) -> str:
+    cards: List[str] = []
+    for _, row in projects_df.iterrows():
+        project_id = str(row.get("project_id", "")).strip()
+        project_name = str(row.get("project_name", project_id)).strip()
+        info = project_info_map.get(project_id, {})
+
+        rows: List[str] = []
+        for key in sorted(info.keys()):
+            val = info.get(key)
+            if val is None or (isinstance(val, float) and pd.isna(val)) or str(val).strip() == "":
+                continue
+            rows.append(
+                "<tr><td>" + html.escape(str(key)) + "</td><td>" + html.escape(str(val)) + "</td></tr>"
+            )
+
+        if not rows:
+            rows_html = "<tr><td colspan='2'>No data</td></tr>"
+        else:
+            rows_html = "".join(rows)
+
+        cards.append(
+            "<div class='project-card'>"
+            "<div class='project-card-header'>" + html.escape(project_id) + " — " + html.escape(project_name) + "</div>"
+            "<table>" + rows_html + "</table>"
+            "</div>"
+        )
+
+    return "<div class='project-cards'>" + "".join(cards) + "</div>"
 
 
 # ----------------------------
@@ -615,6 +1000,15 @@ def add_teamnl_logo(fig: go.Figure) -> None:
             layer="above",
         )
     )
+
+
+def build_header_assets() -> Dict[str, Optional[str]]:
+    profile_path = _find_asset("profielfotos_nocnsf_square", (".png", ".jpg", ".jpeg", ".svg", ".webp"))
+    teamnl_path = _find_asset("teamnl_sport_science", (".png", ".jpg", ".jpeg", ".svg", ".webp"))
+    return {
+        "profile_data_uri": _encode_image_to_data_uri(profile_path) if profile_path else None,
+        "teamnl_data_uri": _encode_image_to_data_uri(teamnl_path) if teamnl_path else None,
+    }
 
 
 def add_profile_picture(fig: go.Figure) -> None:
@@ -790,30 +1184,23 @@ def add_trend_started_closed(
     subplot_row: int,
     title: str,
     project_color_map: Optional[Dict[str, str]] = None,
+    target_year: Optional[int] = None,
 ) -> None:
-    active = projects_df.dropna(subset=["start_date"]).copy()
+    if target_year is None:
+        target_year = date.today().year
 
-    def _resolve_end_date(row: pd.Series) -> pd.Timestamp:
-        if pd.notna(row.get("actual_end_date")):
-            return row["actual_end_date"]
-        if pd.notna(row.get("target_end_date")):
-            return row["target_end_date"]
-        start = row.get("start_date")
-        if pd.notna(start):
-            return pd.Timestamp(date(start.year, 12, 31))
-        return pd.NaT
-
-    active["end_date"] = active.apply(_resolve_end_date, axis=1)
-    active = active.dropna(subset=["end_date"])
-
-    if active.empty:
+    year_start = date(target_year, 1, 1)
+    year_end = date(target_year, 12, 31)
+    week_starts, week_ends, week_positions, bar_width_ms = build_year_week_grid(target_year)
+    x_positions = week_positions.to_pydatetime().tolist() if len(week_positions) else []
+    if week_starts.empty:
         fig.add_trace(
             go.Bar(x=[], y=[], hovertemplate="No weekly activity data.<extra></extra>"),
             row=subplot_row,
             col=1,
         )
         fig.add_annotation(
-            text=f"<b>{title}</b> (no dates found)",
+            text=f"<b>{title}</b> (no weeks found)",
             x=0,
             xref="x domain",
             y=1.12,
@@ -826,30 +1213,205 @@ def add_trend_started_closed(
         fig.update_yaxes(title_text="Active projects", row=subplot_row, col=1)
         return
 
-    active["start_week"] = active["start_date"].dt.to_period("W-MON").dt.to_timestamp()
-    active["end_week"] = active["end_date"].dt.to_period("W-MON").dt.to_timestamp()
-    active.loc[active["end_week"] < active["start_week"], "end_week"] = active["start_week"]
-    active["weeks_active"] = active.apply(
-        lambda row: pd.date_range(row["start_week"], row["end_week"], freq="W-MON"),
-        axis=1,
+    project_rows = projects_df.dropna(subset=["start_date"]).copy()
+    if project_rows.empty:
+        fig.add_trace(
+            go.Bar(x=[], y=[], hovertemplate="No weekly activity data.<extra></extra>"),
+            row=subplot_row,
+            col=1,
+        )
+        fig.add_annotation(
+            text=f"<b>{title}</b> (no project dates found)",
+            x=0,
+            xref="x domain",
+            y=1.12,
+            yref=f"y{subplot_row} domain",
+            showarrow=False,
+            align="left",
+            row=subplot_row,
+            col=1,
+        )
+        fig.update_yaxes(title_text="Active projects", row=subplot_row, col=1)
+        return
+
+    project_rows["project_id"] = project_rows["project_id"].astype(str)
+    project_rows = project_rows.set_index("project_id")
+
+    def _resolve_expected_end(row: pd.Series) -> Optional[pd.Timestamp]:
+        expected = row.get("expected_end_date")
+        expected = parse_date(expected) if expected is not None else None
+        if expected is not None:
+            return expected
+        target_end = row.get("target_end_date")
+        if pd.notna(target_end):
+            return pd.Timestamp(target_end)
+        return None
+
+    def _project_sort_key(project_id: str) -> Tuple[int, str]:
+        try:
+            return int(project_id.replace("_", "")), project_id
+        except (TypeError, ValueError):
+            return float("inf"), project_id
+
+    ordered_projects = sorted(project_rows.index.tolist(), key=_project_sort_key)
+    color_map = project_color_map or {}
+
+    for project_id in ordered_projects:
+        row = project_rows.loc[project_id]
+        project_start = row.get("start_date")
+        if pd.isna(project_start):
+            continue
+        project_start = pd.Timestamp(project_start)
+
+        status_val = str(row.get("status", "Active")).strip()
+        if status_val == "Closed":
+            project_end = row.get("actual_end_date")
+            if pd.isna(project_end):
+                continue
+            project_end = pd.Timestamp(project_end)
+            alpha = 0.18
+        else:
+            expected_end = _resolve_expected_end(row)
+            project_end = expected_end if expected_end is not None else pd.Timestamp(year_end)
+            alpha = 1.0 if status_val == "Active" else 0.25
+
+        active = (week_ends >= project_start) & (week_starts <= project_end)
+        if not active.any():
+            continue
+        y_vals = active.astype(int).tolist()
+
+        base_color = color_map.get(project_id, BASE_BLACK)
+        marker_color = base_color if alpha >= 1.0 else hex_to_rgba(base_color, alpha)
+        tick_text = ["✓" if v == 1 else "" for v in y_vals] if status_val == "Closed" else None
+        hover_text = build_hover_text(row)
+
+        fig.add_trace(
+            go.Bar(
+                x=x_positions,
+                y=y_vals,
+                name=project_id,
+                width=[bar_width_ms] * len(y_vals),
+                marker_color=marker_color,
+                text=tick_text,
+                textposition="inside",
+                textfont=dict(color=BASE_GREEN, size=14),
+                hovertext=[hover_text] * len(y_vals),
+                hovertemplate="%{hovertext}<br>Week starting %{x|%Y-%m-%d}<br>Active=%{y}<extra></extra>",
+                showlegend=False,
+            ),
+            row=subplot_row,
+            col=1,
+        )
+
+    fig.update_yaxes(title_text="Active projects", row=subplot_row, col=1)
+    fig.update_xaxes(title_text="Week", row=subplot_row, col=1, type="date")
+    fig.add_annotation(
+        text=f"<b>{title}</b>",
+        x=0,
+        xref="x domain",
+        y=1.12,
+        yref=f"y{subplot_row} domain",
+        showarrow=False,
+        align="left",
+        row=subplot_row,
+        col=1,
     )
 
+
+def add_hours_per_week(
+    fig: go.Figure,
+    projects_df: pd.DataFrame,
+    time_entries_df: pd.DataFrame,
+    subplot_row: int,
+    title: str,
+    project_color_map: Optional[Dict[str, str]] = None,
+    target_year: Optional[int] = None,
+) -> None:
+    if target_year is None:
+        target_year = date.today().year
+    week_starts, week_ends, week_positions, bar_width_ms = build_year_week_grid(target_year)
+    x_positions = week_positions.to_pydatetime().tolist() if len(week_positions) else []
+    if week_starts.empty:
+        fig.add_trace(
+            go.Scatter(x=[x_positions[0]] if x_positions else [], y=[0], mode="markers", marker_opacity=0, showlegend=False),
+            row=subplot_row,
+            col=1,
+        )
+        fig.add_annotation(
+            text=f"<b>{title}</b> (no weeks found)",
+            x=0,
+            xref="x domain",
+            y=1.12,
+            yref=f"y{subplot_row} domain",
+            showarrow=False,
+            align="left",
+            row=subplot_row,
+            col=1,
+        )
+        fig.update_yaxes(title_text="Hours", row=subplot_row, col=1)
+        fig.update_xaxes(title_text="Week", row=subplot_row, col=1, type="date")
+        return
+
+    if time_entries_df.empty or "date" not in time_entries_df.columns:
+        fig.add_trace(
+            go.Scatter(x=[x_positions[0]] if x_positions else [], y=[0], mode="markers", marker_opacity=0, showlegend=False),
+            row=subplot_row,
+            col=1,
+        )
+        fig.add_annotation(
+            text=f"<b>{title}</b> (no time entries)",
+            x=0,
+            xref="x domain",
+            y=1.12,
+            yref=f"y{subplot_row} domain",
+            showarrow=False,
+            align="left",
+            row=subplot_row,
+            col=1,
+        )
+        fig.update_yaxes(title_text="Hours", row=subplot_row, col=1)
+        fig.update_xaxes(title_text="Week", row=subplot_row, col=1, type="date")
+        return
+
+    entries = time_entries_df.dropna(subset=["date", "duration_hours"]).copy()
+    entries = entries[(entries["date"] >= pd.Timestamp(date(target_year, 1, 1))) & (entries["date"] <= pd.Timestamp(date(target_year, 12, 31)))]
+    if entries.empty:
+        fig.add_trace(
+            go.Scatter(x=[x_positions[0]] if x_positions else [], y=[0], mode="markers", marker_opacity=0, showlegend=False),
+            row=subplot_row,
+            col=1,
+        )
+        fig.add_annotation(
+            text=f"<b>{title}</b> (no time entries)",
+            x=0,
+            xref="x domain",
+            y=1.12,
+            yref=f"y{subplot_row} domain",
+            showarrow=False,
+            align="left",
+            row=subplot_row,
+            col=1,
+        )
+        fig.update_yaxes(title_text="Hours", row=subplot_row, col=1)
+        fig.update_xaxes(title_text="Week", row=subplot_row, col=1, type="date")
+        return
+
+    entries["week"] = entries["date"].dt.to_period("W-SUN").dt.to_timestamp()
+
     weekly = (
-        active[["project_id", "weeks_active"]]
-        .explode("weeks_active")
-        .rename(columns={"weeks_active": "week"})
-        .dropna(subset=["week", "project_id"])
+        entries.groupby(["week", "project_id"], as_index=False)["duration_hours"]
+        .sum()
+        .rename(columns={"duration_hours": "hours"})
     )
-    weekly["project_id"] = weekly["project_id"].astype(str)
 
     if weekly.empty:
         fig.add_trace(
-            go.Bar(x=[], y=[], hovertemplate="No weekly activity data.<extra></extra>"),
+            go.Scatter(x=[x_positions[0]] if x_positions else [], y=[0], mode="markers", marker_opacity=0, showlegend=False),
             row=subplot_row,
             col=1,
         )
         fig.add_annotation(
-            text=f"<b>{title}</b> (no active weeks)",
+            text=f"<b>{title}</b> (no weekly hours)",
             x=0,
             xref="x domain",
             y=1.12,
@@ -859,14 +1421,25 @@ def add_trend_started_closed(
             row=subplot_row,
             col=1,
         )
-        fig.update_yaxes(title_text="Active projects", row=subplot_row, col=1)
+        fig.update_yaxes(title_text="Hours", row=subplot_row, col=1)
+        fig.update_xaxes(title_text="Week", row=subplot_row, col=1, type="date")
         return
 
-    weekly_counts = pd.crosstab(weekly["week"], weekly["project_id"]).sort_index()
+    weekly_hours = pd.crosstab(weekly["week"], weekly["project_id"], values=weekly["hours"], aggfunc="sum").fillna(0.0)
+    weekly_hours = weekly_hours.reindex(week_starts, fill_value=0.0)
 
-    project_rows = active.drop_duplicates(subset=["project_id"]).copy()
+    project_rows = projects_df.drop_duplicates(subset=["project_id"]).copy()
     project_rows["project_id"] = project_rows["project_id"].astype(str)
     project_rows = project_rows.set_index("project_id")
+
+    def _project_sort_key(project_id: str) -> Tuple[int, str]:
+        try:
+            return int(project_id.replace("_", "")), project_id
+        except (TypeError, ValueError):
+            return float("inf"), project_id
+
+    ordered_projects = sorted(weekly_hours.columns.tolist(), key=_project_sort_key)
+    weekly_hours = weekly_hours.reindex(columns=ordered_projects, fill_value=0.0)
 
     def _fmt_date(val: Any) -> Optional[str]:
         if pd.isna(val):
@@ -879,11 +1452,143 @@ def add_trend_started_closed(
     hover_map: Dict[str, str] = {}
     for pid, row in project_rows.iterrows():
         extras = {
-            "resolved_end_date": _fmt_date(row.get("end_date")),
-            "start_week": _fmt_date(row.get("start_week")),
-            "end_week": _fmt_date(row.get("end_week")),
+            "start_date": _fmt_date(row.get("start_date")),
+            "target_end_date": _fmt_date(row.get("target_end_date")),
+            "actual_end_date": _fmt_date(row.get("actual_end_date")),
         }
         hover_map[pid] = build_hover_text(row, extra={k: v for k, v in extras.items() if v is not None})
+
+    color_map = project_color_map or {}
+    # No current-week shading here to keep the plot focused on actual reported hours.
+
+    added_trace = False
+    for project_id in ordered_projects:
+        hours = weekly_hours[project_id]
+        if hours.sum() == 0:
+            continue
+        hover_text = hover_map.get(project_id, f"<b>project_id</b>: {project_id}")
+        status_val = str(project_rows.loc[project_id].get("status", "Active")).strip() if project_id in project_rows.index else "Active"
+        base_color = color_map.get(project_id, BASE_BLACK)
+        if status_val == "Closed":
+            marker_color = hex_to_rgba(base_color, 0.18)
+        elif status_val == "Active":
+            marker_color = base_color
+        else:
+            marker_color = hex_to_rgba(base_color, 0.25)
+        show_tick = status_val == "Closed"
+        tick_text = ["✓" if v > 0 else "" for v in hours.values] if show_tick else None
+        fig.add_trace(
+            go.Bar(
+                x=x_positions,
+                y=hours.values,
+                name=project_id,
+                width=[bar_width_ms] * len(hours),
+                marker_color=marker_color,
+                text=tick_text,
+                textposition="inside",
+                textfont=dict(color=BASE_GREEN, size=14),
+                hovertext=[hover_text] * len(hours),
+                hovertemplate="%{hovertext}<br>Week starting %{x|%Y-%m-%d}<br>Hours=%{y:.2f}<extra></extra>",
+                showlegend=False,
+            ),
+            row=subplot_row,
+            col=1,
+        )
+        added_trace = True
+
+    if not added_trace:
+        print('DEBUGGING: No reported hours!')
+        fig.add_trace(
+            go.Scatter(x=[x_positions[0]] if x_positions else [], y=[0], mode="markers", marker_opacity=0, showlegend=False),
+            row=subplot_row,
+            col=1,
+        )
+        fig.add_annotation(
+            text="No reported hours data.",
+            x=0.5,
+            xref="x domain",
+            y=0.5,
+            yref=f"y{subplot_row} domain",
+            showarrow=False,
+            align="center",
+            row=subplot_row,
+            col=1,
+        )
+
+    fig.update_yaxes(title_text="Hours", row=subplot_row, col=1)
+    fig.update_xaxes(title_text="Week", row=subplot_row, col=1, type="date")
+    fig.add_annotation(text=f"<b>{title}</b>", x=0, xref="x domain", y=1.12, yref=f"y{subplot_row} domain",
+                       showarrow=False, align="left", row=subplot_row, col=1)
+
+
+def add_estimated_magnitude_per_week(
+    fig: go.Figure,
+    projects_df: pd.DataFrame,
+    subplot_row: int,
+    title: str,
+    project_color_map: Optional[Dict[str, str]] = None,
+    target_year: Optional[int] = None,
+) -> None:
+    if target_year is None:
+        target_year = date.today().year
+    year_end = date(target_year, 12, 31)
+    week_starts, week_ends, week_positions, bar_width_ms = build_year_week_grid(target_year)
+    x_positions = week_positions.to_pydatetime().tolist() if len(week_positions) else []
+    if week_starts.empty:
+        fig.add_trace(
+            go.Bar(x=[], y=[], hovertemplate="No weekly magnitude data.<extra></extra>"),
+            row=subplot_row,
+            col=1,
+        )
+        fig.add_annotation(
+            text=f"<b>{title}</b> (no weeks found)",
+            x=0,
+            xref="x domain",
+            y=1.12,
+            yref=f"y{subplot_row} domain",
+            showarrow=False,
+            align="left",
+            row=subplot_row,
+            col=1,
+        )
+        fig.update_yaxes(title_text="Estimated magnitude", row=subplot_row, col=1)
+        fig.update_xaxes(title_text="Week", row=subplot_row, col=1)
+        return
+
+    project_rows = projects_df.dropna(subset=["start_date"]).copy()
+    if project_rows.empty:
+        fig.add_trace(
+            go.Bar(x=[], y=[], hovertemplate="No weekly magnitude data.<extra></extra>"),
+            row=subplot_row,
+            col=1,
+        )
+        fig.add_annotation(
+            text=f"<b>{title}</b> (no project dates found)",
+            x=0,
+            xref="x domain",
+            y=1.12,
+            yref=f"y{subplot_row} domain",
+            showarrow=False,
+            align="left",
+            row=subplot_row,
+            col=1,
+        )
+        fig.update_yaxes(title_text="Estimated magnitude", row=subplot_row, col=1)
+        fig.update_xaxes(title_text="Week", row=subplot_row, col=1)
+        return
+
+    project_rows["project_id"] = project_rows["project_id"].astype(str)
+    project_rows = project_rows.set_index("project_id")
+
+    def _resolve_expected_end(row: pd.Series) -> Optional[pd.Timestamp]:
+        expected = row.get("expected_end_date")
+        expected = parse_date(expected) if expected is not None else None
+        if expected is not None:
+            return expected
+        target_end = row.get("target_end_date")
+        if pd.notna(target_end):
+            return pd.Timestamp(target_end)
+        return None
 
     def _project_sort_key(project_id: str) -> Tuple[int, str]:
         try:
@@ -891,68 +1596,143 @@ def add_trend_started_closed(
         except (TypeError, ValueError):
             return float("inf"), project_id
 
-    ordered_projects = sorted(weekly_counts.columns.tolist(), key=_project_sort_key)
-    weekly_counts = weekly_counts.reindex(columns=ordered_projects, fill_value=0)
+    ordered_projects = sorted(project_rows.index.tolist(), key=_project_sort_key)
     color_map = project_color_map or {}
-    bar_width = pd.Timedelta(days=7)
-    half_bar = bar_width / 2
-    bar_width_ms = bar_width / pd.Timedelta(milliseconds=1)
-    week_positions = weekly_counts.index + half_bar
-
-    current_week_start = pd.Timestamp(date.today()).to_period("W-MON").start_time - pd.Timedelta(days=1)
-    current_week_end = current_week_start + bar_width
-    y_max = max(float(weekly_counts.sum(axis=1).max()), 1.0)
-    week_iso = current_week_start.isocalendar()
-    week_name = f"Current week — Week {week_iso.week:02d} ({week_iso.year}), starts {current_week_start.date()}"
-    fig.add_trace(
-        go.Scatter(
-            x=[current_week_start, current_week_end, current_week_end, current_week_start, current_week_start],
-            y=[0, 0, y_max, y_max, 0],
-            fill="toself",
-            fillcolor="rgba(200,200,200,0.48)",
-            line=dict(width=0),
-            mode="none",
-            hoveron="fills",
-            hovertemplate="%{fullData.name}<extra></extra>",
-            showlegend=False,
-            name=week_name,
-        ),
-        row=subplot_row,
-        col=1,
-    )
 
     for project_id in ordered_projects:
-        counts = weekly_counts[project_id]
-        if counts.sum() == 0:
+        row = project_rows.loc[project_id]
+        project_start = row.get("start_date")
+        if pd.isna(project_start):
             continue
-        hover_text = hover_map.get(project_id, f"<b>project_id</b>: {project_id}")
-        status_val = str(project_rows.loc[project_id].get("status", "Active")).strip() if project_id in project_rows.index else "Active"
-        bar_opacity = 0.5 if status_val.lower() != "active" else 1.0
+        project_start = pd.Timestamp(project_start)
+
+        status_val = str(row.get("status", "Active")).strip()
+        if status_val == "Closed":
+            project_end = row.get("actual_end_date")
+            if pd.isna(project_end):
+                continue
+            project_end = pd.Timestamp(project_end)
+            alpha = 0.18
+        else:
+            expected_end = _resolve_expected_end(row)
+            project_end = expected_end if expected_end is not None else pd.Timestamp(year_end)
+            alpha = 1.0 if status_val == "Active" else 0.25
+
+        active = (week_ends >= project_start) & (week_starts <= project_end)
+        active_weeks = int(active.sum())
+        if active_weeks == 0:
+            continue
+
+        magnitude_value = row.get("estimated_magnitude")
+        weight = estimate_magnitude_weight(magnitude_value)
+        per_week = weight / active_weeks
+        y_vals = [per_week if is_active else 0.0 for is_active in active.tolist()]
+
+        base_color = color_map.get(project_id, BASE_BLACK)
+        marker_color = base_color if alpha >= 1.0 else hex_to_rgba(base_color, alpha)
+        tick_text = ["✓" if v > 0 else "" for v in y_vals] if status_val == "Closed" else None
+        hover_text = build_hover_text(row, extra={"estimated_magnitude": magnitude_value, "weight": weight})
+
         fig.add_trace(
             go.Bar(
-                x=week_positions,
-                y=counts.values,
+                x=x_positions,
+                y=y_vals,
                 name=project_id,
-                width=[bar_width_ms] * len(counts),
-                marker_color=color_map.get(project_id, BASE_BLACK),
-                opacity=bar_opacity,
-                hovertext=[hover_text] * len(counts),
-                hovertemplate="%{hovertext}<br>Week starting %{x|%Y-%m-%d}<br>Active=%{y}<extra></extra>",
+                width=[bar_width_ms] * len(y_vals),
+                marker_color=marker_color,
+                text=tick_text,
+                textposition="inside",
+                textfont=dict(color=BASE_GREEN, size=14),
+                hovertext=[hover_text] * len(y_vals),
+                hovertemplate="%{hovertext}<br>Week starting %{x|%Y-%m-%d}<br>Weight=%{y:.2f}<extra></extra>",
                 showlegend=False,
             ),
             row=subplot_row,
             col=1,
         )
 
-    fig.update_yaxes(title_text="Active projects", row=subplot_row, col=1)
-    fig.update_xaxes(title_text="Week", row=subplot_row, col=1)
-    fig.add_annotation(text=f"<b>{title}</b>", x=0, xref="x domain", y=1.12, yref=f"y{subplot_row} domain",
-                       showarrow=False, align="left", row=subplot_row, col=1)
+    fig.update_yaxes(title_text="Estimated magnitude", row=subplot_row, col=1)
+    fig.update_xaxes(title_text="Week", row=subplot_row, col=1, type="date")
+    fig.add_annotation(
+        text=f"<b>{title}</b>",
+        x=0,
+        xref="x domain",
+        y=1.12,
+        yref=f"y{subplot_row} domain",
+        showarrow=False,
+        align="left",
+        row=subplot_row,
+        col=1,
+    )
 
 
-def build_report_figure(projects_df: pd.DataFrame, time_entries_df: pd.DataFrame, export_date: str) -> go.Figure:
-    total_rows = 5
-    _, project_color_map = build_color_maps(projects_df)
+def add_nn_summary_bars(
+    fig: go.Figure,
+    nn_summary: Optional[Dict[str, Any]],
+    subplot_row: int,
+    title: str,
+) -> None:
+    if not nn_summary or nn_summary.get("nn_reported") is None or nn_summary.get("remaining") is None:
+        fig.add_trace(
+            go.Bar(x=["NN summary unavailable"], y=[0], hovertemplate="No NN summary available.<extra></extra>", showlegend=False),
+            row=subplot_row,
+            col=1,
+        )
+        fig.update_yaxes(title_text="Hours", row=subplot_row, col=1)
+        fig.add_annotation(
+            text=f"<b>{title}</b>",
+            x=0,
+            xref="x domain",
+            y=1.12,
+            yref=axis_domain_ref("y", subplot_row),
+            showarrow=False,
+            align="left",
+            row=subplot_row,
+            col=1,
+        )
+        return
+
+    reported = float(nn_summary.get("nn_reported", 0.0))
+    remaining = float(nn_summary.get("remaining", 0.0))
+    fig.add_trace(
+        go.Bar(x=["Reported"], y=[reported], marker_color=BASE_BLUE, showlegend=False),
+        row=subplot_row,
+        col=1,
+    )
+    fig.add_trace(
+        go.Bar(x=["Remaining"], y=[remaining], marker_color=BASE_YELLOW, showlegend=False),
+        row=subplot_row,
+        col=1,
+    )
+    fig.update_yaxes(title_text="Hours", row=subplot_row, col=1)
+    fig.add_annotation(
+        text=f"<b>{title}</b>",
+        x=0,
+        xref="x domain",
+        y=1.12,
+        yref=axis_domain_ref("y", subplot_row),
+        showarrow=False,
+        align="left",
+        row=subplot_row,
+        col=1,
+    )
+
+
+def build_counts_figure(
+    projects_df: pd.DataFrame,
+    export_date: str,
+    period_start: date,
+    period_end: date,
+    period_label: str,
+    project_color_map: Optional[Dict[str, str]] = None,
+    timeline_projects_df: Optional[pd.DataFrame] = None,
+    timeline_year: Optional[int] = None,
+) -> go.Figure:
+    total_rows = 4
+    if project_color_map is None:
+        _, project_color_map = build_color_maps(projects_df)
+    if timeline_projects_df is None:
+        timeline_projects_df = projects_df
     fig = make_subplots(rows=total_rows, cols=1, shared_xaxes=False, vertical_spacing=0.08)
 
     add_stacked_project_count_bars(fig, projects_df, "programma", 1,
@@ -964,44 +1744,330 @@ def build_report_figure(projects_df: pd.DataFrame, time_entries_df: pd.DataFrame
     add_stacked_project_count_bars(fig, projects_df, "requester", 3,
                                    "Projects per requester (stacked: each project = 1 block)",
                                    project_color_map)
-    add_stacked_hours_bars(fig, projects_df, time_entries_df, "programma", 4,
-                           "Hours per programma (stacked: each project contributes its hours)",
-                           project_color_map)
-    add_trend_started_closed(fig, projects_df, 5,
-                             "Active projects per week (stacked by project)", project_color_map)
+    add_trend_started_closed(
+        fig,
+        timeline_projects_df,
+        4,
+        "Active projects per week (stacked by project)",
+        project_color_map,
+        target_year=timeline_year,
+    )
 
     apply_axis_style(fig, total_rows)
     fig.update_layout(
         barmode="stack",
-        height=1700,
-        margin=dict(l=60, r=60, t=200, b=60),
-        title_text=f"Project Portfolio Overview — Rens<br><sup>Report generation date: {export_date}</sup>",
-        title_x=0.0,
+        height=1400,
+        margin=dict(l=60, r=60, t=40, b=60),
         plot_bgcolor="rgba(255,255,255,1)",
         paper_bgcolor="rgba(250,250,250,1)",
         hoverlabel=dict(namelength=-1),
         showlegend=False,
-        # legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
-    add_profile_picture(fig)
-    add_teamnl_logo(fig)
+    return fig
+
+
+def build_hours_figure(
+    projects_df: pd.DataFrame,
+    time_entries_df_filtered: pd.DataFrame,
+    export_date: str,
+    period_start: date,
+    period_end: date,
+    period_label: str,
+    target_year: Optional[int] = None,
+) -> go.Figure:
+    total_rows = 5
+    _, project_color_map = build_color_maps(projects_df)
+    fig = make_subplots(rows=total_rows, cols=1, shared_xaxes=False, vertical_spacing=0.08)
+
+    add_stacked_hours_bars(fig, projects_df, time_entries_df_filtered, "programma", 1,
+                           "Hours per programma (stacked: each project contributes its hours)",
+                           project_color_map)
+    add_stacked_hours_bars(fig, projects_df, time_entries_df_filtered, "theme", 2,
+                           "Hours per theme (stacked: each project contributes its hours)",
+                           project_color_map)
+    add_stacked_hours_bars(fig, projects_df, time_entries_df_filtered, "requester", 3,
+                           "Hours per requester (stacked: each project contributes its hours)",
+                           project_color_map)
+    add_estimated_magnitude_per_week(fig, projects_df, 4,
+                                     "Estimated magnitude per week (stacked by project)",
+                                     project_color_map, target_year=target_year)
+    add_hours_per_week(fig, projects_df, time_entries_df_filtered, 5,
+                       "Reported hours per week (stacked by project)",
+                       project_color_map, target_year=target_year)
+
+    apply_axis_style(fig, total_rows)
+    fig.update_layout(
+        barmode="stack",
+        height=1750,
+        margin=dict(l=60, r=60, t=40, b=60),
+        plot_bgcolor="rgba(255,255,255,1)",
+        paper_bgcolor="rgba(250,250,250,1)",
+        hoverlabel=dict(namelength=-1),
+        showlegend=False,
+    )
     return fig
 
 
 # ----------------------------
 # Export
 # ----------------------------
-def export_report(fig: go.Figure, output_dir: str, output_archive_dir: str, export_date: str) -> Tuple[str, str]:
-    base_name = f"project_report"
+def write_tabbed_html(
+    counts_fig: go.Figure,
+    hours_fig: go.Figure,
+    out_html_path: str,
+    header_context: Dict[str, Any],
+    tables_html: str,
+    hours_metrics_html: str,
+    nn_pie_html: str,
+    nn_note: Optional[str],
+) -> None:
+    counts_html = pio.to_html(counts_fig, include_plotlyjs="cdn", full_html=False, div_id="counts-fig")
+    hours_html = pio.to_html(hours_fig, include_plotlyjs=False, full_html=False, div_id="hours-fig")
+
+    title_text = html.escape(str(header_context.get("title_text", "Project Portfolio Overview")))
+    export_date = html.escape(str(header_context.get("export_date", "")))
+    period_label = html.escape(str(header_context.get("period_label", "")))
+    period_range = html.escape(str(header_context.get("period_range", "")))
+
+    profile_uri = header_context.get("profile_data_uri")
+    teamnl_uri = header_context.get("teamnl_data_uri")
+
+    profile_img_html = f"<img class='profile-img' src='{profile_uri}' alt='Profile'/>" if profile_uri else ""
+    teamnl_img_html = f"<img class='teamnl-img' src='{teamnl_uri}' alt='TeamNL'/>" if teamnl_uri else ""
+    nn_note_html = f"<div class='nn-note'>{html.escape(nn_note)}</div>" if nn_note else ""
+
+    html_content = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>{title_text}</title>
+  <style>
+    body {{
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      margin: 0;
+      background: #FAFAFA;
+      color: #111;
+    }}
+    .page {{
+      padding: 24px 28px 40px;
+    }}
+    .sticky-header {{
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      background: #FAFAFA;
+      padding-top: 8px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+    }}
+    .report-header {{
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      align-items: flex-start;
+      flex-wrap: wrap;
+      padding: 16px 0 8px;
+    }}
+    .header-left h1 {{
+      margin: 0 0 6px 0;
+      font-size: 26px;
+    }}
+    .header-left .meta {{
+      font-size: 14px;
+      color: #444;
+    }}
+    .header-right {{
+      display: flex;
+      gap: 16px;
+      align-items: center;
+    }}
+    .profile-img {{
+      width: 120px;
+      height: 120px;
+      object-fit: cover;
+      border-radius: 10px;
+      border: 2px solid #EEE;
+      background: #FFF;
+    }}
+    .teamnl-img {{
+      height: 64px;
+      object-fit: contain;
+    }}
+    .tabs {{
+      display: flex;
+      gap: 8px;
+      margin: 4px 0 12px;
+      padding-bottom: 12px;
+    }}
+    .tab-btn {{
+      padding: 8px 16px;
+      border: 1px solid #CCC;
+      border-radius: 6px;
+      background: #FFF;
+      cursor: pointer;
+      font-weight: 600;
+    }}
+    .tab-btn.active {{
+      background: #01378A;
+      border-color: #01378A;
+      color: #FFF;
+    }}
+    .tab-panel {{
+      display: none;
+    }}
+    .tab-panel.active {{
+      display: block;
+    }}
+    .hours-metrics {{
+      margin: 6px 0 16px;
+    }}
+    .nn-metrics {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px 18px;
+      font-size: 14px;
+      background: #FFF;
+      border: 1px solid #DDD;
+      border-radius: 8px;
+      padding: 10px 12px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }}
+    .nn-note {{
+      margin-top: 6px;
+      font-size: 13px;
+      color: #8A3B3B;
+    }}
+    .project-info-section {{
+      margin-top: 28px;
+    }}
+    .project-cards {{
+      display: flex;
+      gap: 16px;
+      overflow-x: auto;
+      padding-bottom: 8px;
+    }}
+    .project-card {{
+      min-width: 280px;
+      background: #FFF;
+      border: 1px solid #DDD;
+      border-radius: 10px;
+      padding: 12px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }}
+    .project-card-header {{
+      font-weight: 700;
+      margin-bottom: 8px;
+    }}
+    .project-card table {{
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }}
+    .project-card td {{
+      padding: 3px 4px;
+      border-bottom: 1px solid #EEE;
+      vertical-align: top;
+      word-break: break-word;
+    }}
+    .project-card td:first-child {{
+      width: 45%;
+      color: #555;
+    }}
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="sticky-header">
+      <div class="report-header">
+        <div class="header-left">
+          <h1>{title_text}</h1>
+          <div class="meta"><b>{period_label}</b> — {period_range}</div>
+          <div class="meta">Generated: {export_date}</div>
+          {nn_note_html}
+        </div>
+        <div class="header-right">
+          {teamnl_img_html}
+          {profile_img_html}
+          {nn_pie_html}
+        </div>
+      </div>
+
+      <div class="tabs">
+        <button class="tab-btn active" id="btn-counts" onclick="showTab('counts')">Counts</button>
+        <button class="tab-btn" id="btn-hours" onclick="showTab('hours')">Hours</button>
+      </div>
+    </div>
+
+    <div class="tab-panel active" id="tab-counts">
+      {counts_html}
+    </div>
+    <div class="tab-panel" id="tab-hours">
+      <div class="hours-metrics">{hours_metrics_html}</div>
+      {hours_html}
+    </div>
+
+    <div class="project-info-section">
+      <h2>Project details</h2>
+      {tables_html}
+    </div>
+  </div>
+
+  <script>
+    function showTab(name) {{
+      document.getElementById("tab-counts").classList.remove("active");
+      document.getElementById("tab-hours").classList.remove("active");
+      document.getElementById("btn-counts").classList.remove("active");
+      document.getElementById("btn-hours").classList.remove("active");
+      document.getElementById("tab-" + name).classList.add("active");
+      document.getElementById("btn-" + name).classList.add("active");
+      var figId = name + "-fig";
+      var figEl = document.getElementById(figId);
+      if (figEl && window.Plotly) {{
+        Plotly.Plots.resize(figEl);
+      }}
+    }}
+  </script>
+</body>
+</html>
+"""
+
+    with open(out_html_path, "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+
+def export_tabbed_report(
+    counts_fig: go.Figure,
+    hours_fig: go.Figure,
+    output_dir: str,
+    output_archive_dir: str,
+    base_name: str,
+    archive_base_name: str,
+    export_date: str,
+    header_context: Dict[str, Any],
+    tables_html: str,
+    hours_metrics_html: str,
+    nn_pie_html: str,
+    nn_note: Optional[str],
+) -> Tuple[str, str]:
     html_path = os.path.join(output_dir, f"{base_name}.html")
     png_path = os.path.join(output_dir, f"{base_name}.png")
 
-    dated_base_name = f"{export_date}_project_report"
+    dated_base_name = f"{archive_base_name}_generated_{export_date}"
     dated_html_path = os.path.join(output_archive_dir, f"{dated_base_name}.html")
     dated_png_path = os.path.join(output_archive_dir, f"{dated_base_name}.png")
 
-    fig.write_html(html_path, include_plotlyjs="cdn", full_html=True)
-    fig.write_image(png_path, scale=2)  # requires kaleido
+    write_tabbed_html(
+        counts_fig,
+        hours_fig,
+        html_path,
+        header_context,
+        tables_html,
+        hours_metrics_html,
+        nn_pie_html,
+        nn_note,
+    )
+
+    counts_fig.write_image(png_path, scale=2)  # requires kaleido
 
     shutil.copyfile(html_path, dated_html_path)
     shutil.copyfile(png_path, dated_png_path)
@@ -1009,24 +2075,147 @@ def export_report(fig: go.Figure, output_dir: str, output_archive_dir: str, expo
     return html_path, png_path
 
 
-def main() -> None:
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate project portfolio reports.")
+    parser.add_argument(
+        "--report-type",
+        choices=["yearly", "monthly", "weekly", "all"],
+        default="all",
+        help="Report type to generate.",
+    )
+    parser.add_argument(
+        "--asof",
+        default=None,
+        help="As-of date in YYYY-MM-DD (defaults to today).",
+    )
+    return parser.parse_args()
+
+
+def parse_asof_date(asof_str: Optional[str]) -> date:
+    if not asof_str:
+        return date.today()
+    try:
+        return date.fromisoformat(asof_str)
+    except ValueError as exc:
+        raise SystemExit(f"Invalid --asof date '{asof_str}' (expected YYYY-MM-DD).") from exc
+
+
+def generate_reports(report_type: str, asof_date: date) -> None:
     export_date = date.today().isoformat()  # YYYY-MM-DD
-    projects_df, time_entries_df = load_and_validate_projects(PROJECTEN_DIR)
+    print(f"As-of date used: {asof_date.isoformat()}")
+
+    projects_df, time_entries_df, project_info_map = load_and_validate_projects(PROJECTEN_DIR)
     if projects_df.empty:
         raise SystemExit(f"No project folders found under: {PROJECTEN_DIR}")
 
     REPORT_DIR = os.path.join(os.path.dirname(SCRIPT_DIR), "Reports")
     REPORTS_ARCHIVE_DIR = os.path.join(os.path.dirname(SCRIPT_DIR), "Reports", "Archive")
+    os.makedirs(REPORT_DIR, exist_ok=True)
     os.makedirs(REPORTS_ARCHIVE_DIR, exist_ok=True)
 
     projects_df.to_csv(os.path.join(REPORT_DIR, "projects_overview.csv"), index=False)
     time_entries_df.to_csv(os.path.join(REPORT_DIR, "time_entries_df.csv"), index=False)
 
-    fig = build_report_figure(projects_df, time_entries_df, export_date)
-    html_path, png_path = export_report(fig, REPORT_DIR, REPORTS_ARCHIVE_DIR, export_date)
+    periods = compute_report_periods(asof_date)
+    header_assets = build_header_assets()
+    tables_html = build_project_info_tables_html(projects_df, project_info_map)
 
-    print(f"Exported HTML: {html_path}")
-    print(f"Exported PNG : {png_path}")
+    nn_df, nn_path, nn_status = load_nn_maandelijks_df()
+    print(nn_status)
+    _, project_color_map = build_color_maps(projects_df)
+
+    report_types = ["yearly", "monthly", "weekly"] if report_type == "all" else [report_type]
+    timeline_year = periods["yearly"]["end"].year
+
+    for rtype in report_types:
+        period_info = periods[rtype]
+        period_start = period_info["start"]
+        period_end = period_info["end"]
+        period_label = period_info["label"]
+        period_key = period_info["key"]
+
+        time_entries_filtered = filter_time_entries_by_period(time_entries_df, period_start, period_end)
+
+        nn_summary = None
+        nn_note = None
+        nn_pie_html = ""
+        hours_metrics_html = ""
+        if rtype in ("monthly", "yearly"):
+            if nn_df is None:
+                nn_note = nn_status
+            else:
+                nn_summary, nn_note = compute_nn_summary(nn_df, rtype, period_end, time_entries_filtered)
+                if nn_note:
+                    nn_note = f"NN_maandelijks: {nn_note}"
+            nn_pie_html = build_nn_pie_html(nn_summary)
+            hours_metrics_html = build_nn_metrics_html(nn_summary, nn_note)
+
+        projects_for_counts = projects_df
+        if rtype in ("weekly", "monthly"):
+            projects_for_counts = filter_projects_with_hours(projects_df, time_entries_filtered)
+
+        counts_fig = build_counts_figure(
+            projects_for_counts,
+            export_date,
+            period_start,
+            period_end,
+            period_label,
+            project_color_map=project_color_map,
+            timeline_projects_df=projects_df,
+            timeline_year=timeline_year,
+        )
+        hours_fig = build_hours_figure(
+            projects_df,
+            time_entries_filtered,
+            export_date,
+            period_start,
+            period_end,
+            period_label,
+            target_year=timeline_year,
+        )
+
+        period_range = f"{period_start.isoformat()} to {period_end.isoformat()}"
+        header_context = dict(
+            title_text="Project Portfolio Overview — Rens",
+            export_date=export_date,
+            period_label=period_label,
+            period_range=period_range,
+            **header_assets,
+        )
+
+        if rtype == "yearly":
+            base_name = "project_report_yearly"
+            archive_base_name = f"project_report_yearly_{period_key}"
+        elif rtype == "monthly":
+            base_name = f"project_report_monthly_{period_key}"
+            archive_base_name = base_name
+        else:
+            base_name = f"project_report_weekly_{period_key}"
+            archive_base_name = base_name
+
+        html_path, png_path = export_tabbed_report(
+            counts_fig,
+            hours_fig,
+            REPORT_DIR,
+            REPORTS_ARCHIVE_DIR,
+            base_name,
+            archive_base_name,
+            export_date,
+            header_context,
+            tables_html,
+            hours_metrics_html,
+            nn_pie_html,
+            nn_note,
+        )
+
+        print(f"Generated {rtype} report: {period_range} -> {html_path}")
+        print(f"PNG exported: {png_path}")
+
+
+def main() -> None:
+    args = parse_args()
+    asof_date = parse_asof_date(args.asof)
+    generate_reports(args.report_type, asof_date)
 
 
 if __name__ == "__main__":
