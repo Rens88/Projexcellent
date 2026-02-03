@@ -12,3 +12,4 @@ Projecten/*
 # And keep their contents
 !Projecten/dummy1/**
 !Projecten/dummy2/**
+*.pyc

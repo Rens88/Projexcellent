@@ -903,9 +903,14 @@ def build_nn_metrics_html(nn_summary: Optional[Dict[str, Any]], note: Optional[s
 
 
 def _plotly_cdn_src() -> str:
-    version = getattr(pio, "_plotlyjs_version", None)
-    if isinstance(version, str) and version.strip():
-        return f"https://cdn.plot.ly/plotly-{version}.min.js"
+    # Pin plotly.js to the plotly.py-bundled version when possible.
+    # Some older/newer plotly.py versions expose this as `plotlyjs_version` (public)
+    # instead of `_plotlyjs_version` (private). Falling back to `plotly-latest` can
+    # cause subtle rendering regressions between `.show()` and exported HTML.
+    for attr in ("plotlyjs_version", "_plotlyjs_version"):
+        version = getattr(pio, attr, None)
+        if isinstance(version, str) and version.strip():
+            return f"https://cdn.plot.ly/plotly-{version}.min.js"
     return "https://cdn.plot.ly/plotly-latest.min.js"
 
 
@@ -1354,11 +1359,12 @@ def add_hours_per_week(
         data_start = display_start
     if data_end is None:
         data_end = display_end
+
     week_starts, week_ends, week_positions, bar_width_ms = build_period_week_grid(display_start, display_end)
     x_positions = week_positions.to_pydatetime().tolist() if len(week_positions) else []
     if week_starts.empty:
         fig.add_trace(
-            go.Scatter(x=[x_positions[0]] if x_positions else [], y=[0], mode="markers", marker_opacity=0, showlegend=False),
+            go.Bar(x=[], y=[], hovertemplate="No weekly hours data.<extra></extra>"),
             row=subplot_row,
             col=1,
         )
@@ -1377,7 +1383,8 @@ def add_hours_per_week(
         fig.update_xaxes(title_text="Week", row=subplot_row, col=1, type="date")
         return
 
-    if time_entries_df.empty or "date" not in time_entries_df.columns:
+    required_cols = {"project_id", "date", "duration_hours"}
+    if time_entries_df.empty or not required_cols.issubset(time_entries_df.columns):
         fig.add_trace(
             go.Scatter(x=[x_positions[0]] if x_positions else [], y=[0], mode="markers", marker_opacity=0, showlegend=False),
             row=subplot_row,
@@ -1398,7 +1405,10 @@ def add_hours_per_week(
         fig.update_xaxes(title_text="Week", row=subplot_row, col=1, type="date")
         return
 
-    entries = time_entries_df.dropna(subset=["date", "duration_hours"]).copy()
+    entries = time_entries_df.dropna(subset=["project_id", "date", "duration_hours"]).copy()
+    entries["project_id"] = entries["project_id"].astype(str)
+    entries["duration_hours"] = pd.to_numeric(entries["duration_hours"], errors="coerce")
+    entries = entries.dropna(subset=["duration_hours"])
     entries = entries[(entries["date"] >= pd.Timestamp(data_start)) & (entries["date"] <= pd.Timestamp(data_end))]
     if entries.empty:
         fig.add_trace(
@@ -1421,22 +1431,21 @@ def add_hours_per_week(
         fig.update_xaxes(title_text="Week", row=subplot_row, col=1, type="date")
         return
 
-    entries["week"] = entries["date"].dt.to_period("W-SUN").dt.to_timestamp() # @codex stop updating w-sun to w-mon, for some reason, w-sun sets the dates correctly to starting on mondays, whereas w-mon sets the dates to starting the week on tuesdays.
-
-    weekly = (
-        entries.groupby(["week", "project_id"], as_index=False)["duration_hours"]
-        .sum()
-        .rename(columns={"duration_hours": "hours"})
+    hours_by_project = (
+        entries.groupby("project_id")["duration_hours"]
+        .sum(min_count=1)
+        .fillna(0.0)
     )
 
-    if weekly.empty:
+    project_rows = projects_df.dropna(subset=["start_date"]).copy()
+    if project_rows.empty:
         fig.add_trace(
-            go.Scatter(x=[x_positions[0]] if x_positions else [], y=[0], mode="markers", marker_opacity=0, showlegend=False),
+            go.Bar(x=[], y=[], hovertemplate="No weekly hours data.<extra></extra>"),
             row=subplot_row,
             col=1,
         )
         fig.add_annotation(
-            text=f"<b>{title}</b> (no weekly hours)",
+            text=f"<b>{title}</b> (no project dates found)",
             x=0,
             xref="x domain",
             y=1.12,
@@ -1450,21 +1459,18 @@ def add_hours_per_week(
         fig.update_xaxes(title_text="Week", row=subplot_row, col=1, type="date")
         return
 
-    weekly_hours = pd.crosstab(weekly["week"], weekly["project_id"], values=weekly["hours"], aggfunc="sum").fillna(0.0)
-    weekly_hours = weekly_hours.reindex(week_starts, fill_value=0.0)
-
-    total_reported = float(entries["duration_hours"].sum())
-    total_plotted = float(weekly_hours.to_numpy().sum())
-    if abs(total_reported - total_plotted) > 0.01:
-        print(
-            f"WARNING: Reported hours mismatch in weekly plot. "
-            f"Reported={total_reported:.2f}, Plotted={total_plotted:.2f}, "
-            f"Diff={(total_reported - total_plotted):.2f}"
-        )
-
-    project_rows = projects_df.drop_duplicates(subset=["project_id"]).copy()
     project_rows["project_id"] = project_rows["project_id"].astype(str)
     project_rows = project_rows.set_index("project_id")
+
+    def _resolve_expected_end(row: pd.Series) -> Optional[pd.Timestamp]:
+        expected = row.get("expected_end_date")
+        expected = parse_date(expected) if expected is not None else None
+        if expected is not None:
+            return expected
+        target_end = row.get("target_end_date")
+        if pd.notna(target_end):
+            return pd.Timestamp(target_end)
+        return None
 
     def _project_sort_key(project_id: str) -> Tuple[int, str]:
         try:
@@ -1472,57 +1478,75 @@ def add_hours_per_week(
         except (TypeError, ValueError):
             return float("inf"), project_id
 
-    ordered_projects = sorted(weekly_hours.columns.tolist(), key=_project_sort_key)
-    weekly_hours = weekly_hours.reindex(columns=ordered_projects, fill_value=0.0)
-
-    def _fmt_date(val: Any) -> Optional[str]:
-        if pd.isna(val):
-            return None
-        try:
-            return pd.Timestamp(val).date().isoformat()
-        except Exception:
-            return str(val)
-
-    hover_map: Dict[str, str] = {}
-    for pid, row in project_rows.iterrows():
-        extras = {
-            "start_date": _fmt_date(row.get("start_date")),
-            "target_end_date": _fmt_date(row.get("target_end_date")),
-            "actual_end_date": _fmt_date(row.get("actual_end_date")),
-        }
-        hover_map[pid] = build_hover_text(row, extra={k: v for k, v in extras.items() if v is not None})
-
+    ordered_projects = sorted(project_rows.index.tolist(), key=_project_sort_key)
     color_map = project_color_map or {}
-    # No current-week shading here to keep the plot focused on actual reported hours.
 
+    data_start_ts = pd.Timestamp(data_start)
+    data_end_ts = pd.Timestamp(data_end)
     added_trace = False
+
     for project_id in ordered_projects:
-        hours = weekly_hours[project_id]
-        if hours.sum() == 0:
+        reported_hours = float(hours_by_project.get(project_id, 0.0))
+        if reported_hours <= 0:
             continue
-        hover_text = hover_map.get(project_id, f"<b>project_id</b>: {project_id}")
-        status_val = str(project_rows.loc[project_id].get("status", "Active")).strip() if project_id in project_rows.index else "Active"
-        base_color = color_map.get(project_id, BASE_BLACK)
+
+        row = project_rows.loc[project_id]
+        project_start = row.get("start_date")
+        if pd.isna(project_start):
+            continue
+        project_start = pd.Timestamp(project_start)
+
+        status_val = str(row.get("status", "Active")).strip()
         if status_val == "Closed":
-            marker_color = hex_to_rgba(base_color, 0.18)
-        elif status_val == "Active":
-            marker_color = base_color
+            project_end = row.get("actual_end_date")
+            if pd.isna(project_end):
+                continue
+            project_end = pd.Timestamp(project_end)
+            alpha = 0.18
         else:
-            marker_color = hex_to_rgba(base_color, 0.25)
-        show_tick = status_val == "Closed"
-        tick_text = ["✓" if v > 0 else "" for v in hours.values] if show_tick else None
+            expected_end = _resolve_expected_end(row)
+            project_end = expected_end if expected_end is not None else data_end_ts
+            alpha = 1.0 if status_val == "Active" else 0.25
+
+        active_start = max(project_start, data_start_ts)
+        active_end = min(project_end, data_end_ts)
+        if active_end < active_start:
+            continue
+
+        active = (week_ends >= active_start) & (week_starts <= active_end)
+        if not active.any():
+            continue
+        total_active_weeks = int(active.sum())
+        if total_active_weeks == 0:
+            continue
+
+        per_week = reported_hours / total_active_weeks
+        y_vals = [per_week if is_active else 0.0 for is_active in active.tolist()]
+
+        base_color = color_map.get(project_id, BASE_BLACK)
+        marker_color = base_color if alpha >= 1.0 else hex_to_rgba(base_color, alpha)
+        tick_text = ["✓" if v > 0 else "" for v in y_vals] if status_val == "Closed" else None
+        hover_text = build_hover_text(
+            row,
+            extra={
+                "reported_hours": f"{reported_hours:.2f}",
+                "active_weeks": total_active_weeks,
+                "hours_per_week": f"{per_week:.2f}",
+            },
+        )
+
         fig.add_trace(
             go.Bar(
                 x=x_positions,
-                y=hours.values,
+                y=y_vals,
                 name=project_id,
-                width=[bar_width_ms] * len(hours),
+                width=[bar_width_ms] * len(y_vals),
                 marker_color=marker_color,
                 text=tick_text,
                 textposition="inside",
                 textfont=dict(color=BASE_GREEN, size=14),
-                hovertext=[hover_text] * len(hours),
-                hovertemplate="%{hovertext}<br>Week starting %{x|%Y-%m-%d}<br>Hours=%{y:.2f}<extra></extra>",
+                hovertext=[hover_text] * len(y_vals),
+                hovertemplate="%{hovertext}<br>Week starting %{x|%Y-%m-%d}<br>Hours/week=%{y:.2f}<extra></extra>",
                 showlegend=False,
             ),
             row=subplot_row,
@@ -1550,8 +1574,17 @@ def add_hours_per_week(
 
     fig.update_yaxes(title_text="Hours", row=subplot_row, col=1)
     fig.update_xaxes(title_text="Week", row=subplot_row, col=1, type="date")
-    fig.add_annotation(text=f"<b>{title}</b>", x=0, xref="x domain", y=1.12, yref=f"y{subplot_row} domain",
-                       showarrow=False, align="left", row=subplot_row, col=1)
+    fig.add_annotation(
+        text=f"<b>{title}</b>",
+        x=0,
+        xref="x domain",
+        y=1.12,
+        yref=f"y{subplot_row} domain",
+        showarrow=False,
+        align="left",
+        row=subplot_row,
+        col=1,
+    )
 
 
 def add_estimated_magnitude_per_week(
