@@ -2341,22 +2341,75 @@ def _to_float_list(values: Any) -> List[float]:
     return out
 
 
-def build_percentage_figure_from_hours(hours_fig: go.Figure) -> go.Figure:
+def _layout_axis_key(axis_id: str, axis_letter: str) -> str:
+    if not axis_id:
+        return f"{axis_letter}axis"
+    suffix = axis_id[1:]  # "y" -> "", "y2" -> "2"
+    return f"{axis_letter}axis{suffix}"
+
+
+def _axis_title_text(axis_obj: Any) -> str:
+    title = getattr(axis_obj, "title", None)
+    if title is None:
+        return ""
+    if isinstance(title, dict):
+        text = title.get("text")
+    else:
+        text = getattr(title, "text", None)
+    return str(text).strip() if text is not None else ""
+
+
+def _is_date_xaxis(fig: go.Figure, xaxis_id: str) -> bool:
+    layout_key = _layout_axis_key(xaxis_id, "x")
+    axis_obj = getattr(fig.layout, layout_key, None)
+    axis_type = getattr(axis_obj, "type", None) if axis_obj is not None else None
+    return str(axis_type).lower() == "date"
+
+
+def _max_stacked_y_for_axis(fig: go.Figure, yaxis_id: str) -> float:
+    sums_by_x: Dict[Any, float] = {}
+    for trace in fig.data:
+        if getattr(trace, "type", None) != "bar":
+            continue
+        trace_yaxis = getattr(trace, "yaxis", None) or "y"
+        if trace_yaxis != yaxis_id:
+            continue
+        xs = list(getattr(trace, "x", None) or [])
+        ys = _to_float_list(getattr(trace, "y", None))
+        for x, y in zip(xs, ys):
+            sums_by_x[x] = sums_by_x.get(x, 0.0) + float(y or 0.0)
+    return max(sums_by_x.values()) if sums_by_x else 0.0
+
+
+def build_percentage_figure_from_hours(hours_fig: go.Figure, total_period_hours: Optional[float] = None) -> go.Figure:
     fig = go.Figure(hours_fig.to_dict())
 
     totals_by_axis: Dict[str, float] = {}
+    xaxis_by_yaxis: Dict[str, str] = {}
     for trace in fig.data:
         if getattr(trace, "type", None) != "bar":
             continue
         axis_id = getattr(trace, "yaxis", None) or "y"
+        xaxis_by_yaxis.setdefault(axis_id, getattr(trace, "xaxis", None) or "x")
         y_vals = _to_float_list(getattr(trace, "y", None))
         totals_by_axis[axis_id] = totals_by_axis.get(axis_id, 0.0) + sum(y_vals)
+
+    period_hours = float(total_period_hours) if total_period_hours is not None else None
+    denom_by_axis: Dict[str, float] = {}
+    for axis_id, plotted_total in totals_by_axis.items():
+        yaxis_layout_key = _layout_axis_key(axis_id, "y")
+        axis_obj = getattr(fig.layout, yaxis_layout_key, None)
+        title_text = _axis_title_text(axis_obj)
+        if period_hours is not None and period_hours > 0 and title_text.lower() == "hours":
+            denom_by_axis[axis_id] = period_hours
+        else:
+            denom_by_axis[axis_id] = plotted_total
 
     for trace in fig.data:
         if getattr(trace, "type", None) != "bar":
             continue
         axis_id = getattr(trace, "yaxis", None) or "y"
-        denom = totals_by_axis.get(axis_id, 0.0)
+        denom = denom_by_axis.get(axis_id, 0.0)
         if denom <= 0:
             continue
 
@@ -2380,13 +2433,21 @@ def build_percentage_figure_from_hours(hours_fig: go.Figure) -> go.Figure:
             body = body + "<br>Percent=%{y:.1f}%"
         trace.hovertemplate = body + "<extra></extra>"
 
-    def _update_axis(axis: Any) -> None:
-        axis.title = dict(text="Percent")
-        axis.ticksuffix = "%"
-        axis.tickformat = ".0f"
-        axis.range = [0, 100]
+    for axis_id in totals_by_axis.keys():
+        yaxis_layout_key = _layout_axis_key(axis_id, "y")
+        axis_obj = getattr(fig.layout, yaxis_layout_key, None)
+        if axis_obj is None:
+            continue
+        axis_obj.title = dict(text="Percent")
+        axis_obj.ticksuffix = "%"
+        axis_obj.tickformat = ".0f"
+        axis_obj.range = [0, 100]
 
-    fig.for_each_yaxis(_update_axis)
+        xaxis_id = xaxis_by_yaxis.get(axis_id, "x")
+        if _is_date_xaxis(fig, xaxis_id):
+            max_stack = _max_stacked_y_for_axis(fig, axis_id)
+            if max_stack > 0:
+                axis_obj.range = [0, max_stack * 1.1]
     return fig
 
 
@@ -3552,7 +3613,12 @@ def generate_reports(report_type: str, asof_date: date) -> None:
                 period_label,
                 report_type=rtype,
             )
-            percentage_fig = build_percentage_figure_from_hours(hours_fig)
+            total_period_hours = (
+                float(pd.to_numeric(time_entries_filtered["duration_hours"], errors="coerce").fillna(0.0).sum())
+                if not time_entries_filtered.empty and "duration_hours" in time_entries_filtered.columns
+                else 0.0
+            )
+            percentage_fig = build_percentage_figure_from_hours(hours_fig, total_period_hours=total_period_hours)
 
             period_payloads[rtype] = dict(
                 label=period_label,
@@ -3610,7 +3676,12 @@ def generate_reports(report_type: str, asof_date: date) -> None:
                 period_label,
                 report_type="monthly",
             )
-            percentage_fig = build_percentage_figure_from_hours(hours_fig)
+            total_period_hours = (
+                float(pd.to_numeric(time_entries_filtered["duration_hours"], errors="coerce").fillna(0.0).sum())
+                if not time_entries_filtered.empty and "duration_hours" in time_entries_filtered.columns
+                else 0.0
+            )
+            percentage_fig = build_percentage_figure_from_hours(hours_fig, total_period_hours=total_period_hours)
 
             period_payloads[period_id] = dict(
                 label=period_label,
@@ -3699,7 +3770,12 @@ def generate_reports(report_type: str, asof_date: date) -> None:
         period_label,
         report_type=rtype,
     )
-    percentage_fig = build_percentage_figure_from_hours(hours_fig)
+    total_period_hours = (
+        float(pd.to_numeric(time_entries_filtered["duration_hours"], errors="coerce").fillna(0.0).sum())
+        if not time_entries_filtered.empty and "duration_hours" in time_entries_filtered.columns
+        else 0.0
+    )
+    percentage_fig = build_percentage_figure_from_hours(hours_fig, total_period_hours=total_period_hours)
 
     period_range = f"{period_start.isoformat()} to {period_end.isoformat()}"
     header_context = dict(
