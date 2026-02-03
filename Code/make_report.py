@@ -1014,6 +1014,7 @@ def _format_minutes_hhmm(total_minutes: Any) -> str:
 def build_logged_hours_breakdown_html(
     time_entries_df_filtered: pd.DataFrame,
     title: str = "Logged hours (by project)",
+    show_percentage: bool = False,
 ) -> str:
     if time_entries_df_filtered is None or time_entries_df_filtered.empty:
         return (
@@ -1073,6 +1074,19 @@ def build_logged_hours_breakdown_html(
     totals["total_minutes"] = pd.to_numeric(totals["total_minutes"], errors="coerce").fillna(0.0)
     totals = totals.sort_values(["total_minutes", "project_name", "project_id"], ascending=[False, True, True])
 
+    total_period_minutes = float(entries["duration_minutes"].sum()) if show_percentage else 0.0
+    if show_percentage and total_period_minutes <= 0:
+        show_percentage = False
+
+    def fmt_pct(minutes: Any) -> str:
+        if not show_percentage:
+            return ""
+        try:
+            m = float(minutes or 0.0)
+        except (TypeError, ValueError):
+            m = 0.0
+        return f"{(m * 100.0 / total_period_minutes):.1f}%"
+
     projects_html: List[str] = []
     for _, row in totals.iterrows():
         project_id = str(row.get("project_id", "")).strip()
@@ -1085,28 +1099,38 @@ def build_logged_hours_breakdown_html(
         entry_rows: List[str] = []
         for _, entry in project_entries.iterrows():
             dur_text = _format_minutes_hhmm(entry.get("duration_minutes"))
+            pct_text = fmt_pct(entry.get("duration_minutes"))
             desc_val = entry.get(what_i_did_col) if what_i_did_col else ""
             desc_html = _escape_html_multiline(desc_val).strip()
             if not desc_html:
                 desc_html = "<span class='hours-entry-empty'>(no details)</span>"
+            pct_cell = (
+                f"<td class='hours-entry-percent'>{html.escape(pct_text)}</td>"
+                if show_percentage
+                else ""
+            )
             entry_rows.append(
                 "<tr>"
                 f"<td class='hours-entry-duration'>{html.escape(dur_text)}</td>"
+                f"{pct_cell}"
                 f"<td>{desc_html}</td>"
                 "</tr>"
             )
 
+        pct_summary = f" <span class='hours-project-percent'>({html.escape(fmt_pct(total_minutes))})</span>" if show_percentage else ""
         summary_html = (
             f"<span class='hours-project-total'>{html.escape(_format_minutes_hhmm(total_minutes))}</span>, "
             f"<span class='hours-project-name'>{html.escape(project_name)}</span>"
+            f"{pct_summary}"
         )
 
+        header_pct = "<th>Percent</th>" if show_percentage else ""
         projects_html.append(
             "<details class='hours-project'>"
             f"<summary>{summary_html}</summary>"
             "<div class='hours-project-entries'>"
             "<table class='hours-entry-table'>"
-            "<thead><tr><th>Duration</th><th>Details</th></tr></thead>"
+            f"<thead><tr><th>Duration</th>{header_pct}<th>Details</th></tr></thead>"
             "<tbody>"
             + "".join(entry_rows)
             + "</tbody>"
@@ -1115,11 +1139,12 @@ def build_logged_hours_breakdown_html(
             "</details>"
         )
 
+    note_text = "Percentages are of the total logged time in this period." if show_percentage else "Click a project to expand."
     return (
         "<div class='hours-breakdown'>"
         "<div class='hours-breakdown-header'>"
         f"<h3>{html.escape(title)}</h3>"
-        "<div class='hours-breakdown-note'>Click a project to expand.</div>"
+        f"<div class='hours-breakdown-note'>{html.escape(note_text)}</div>"
         "</div>"
         "<div class='hours-breakdown-list'>"
         + "".join(projects_html)
@@ -1613,33 +1638,20 @@ def add_hours_per_week(
         fig.update_xaxes(title_text="Week", row=subplot_row, col=1, type="date")
         return
 
-    hours_by_project = (
-        entries.groupby("project_id")["duration_hours"]
+    entries["__week_start"] = entries["date"].dt.normalize() - pd.to_timedelta(entries["date"].dt.weekday, unit="D")
+    weekly_hours = (
+        entries.groupby(["project_id", "__week_start"], as_index=False)["duration_hours"]
+        .sum(min_count=1)
+        .rename(columns={"duration_hours": "week_hours"})
+    )
+    weekly_hours["week_hours"] = pd.to_numeric(weekly_hours["week_hours"], errors="coerce").fillna(0.0)
+    totals_by_project = (
+        weekly_hours.groupby("project_id")["week_hours"]
         .sum(min_count=1)
         .fillna(0.0)
     )
 
     project_rows = projects_df.dropna(subset=["start_date"]).copy()
-    if project_rows.empty:
-        fig.add_trace(
-            go.Bar(x=[], y=[], hovertemplate="No weekly hours data.<extra></extra>"),
-            row=subplot_row,
-            col=1,
-        )
-        fig.add_annotation(
-            text=f"<b>{title}</b> (no project dates found)",
-            x=0,
-            xref="x domain",
-            y=1.12,
-            yref=f"y{subplot_row} domain",
-            showarrow=False,
-            align="left",
-            row=subplot_row,
-            col=1,
-        )
-        fig.update_yaxes(title_text="Hours", row=subplot_row, col=1)
-        fig.update_xaxes(title_text="Week", row=subplot_row, col=1, type="date")
-        return
 
     project_rows["project_id"] = project_rows["project_id"].astype(str)
     project_rows = project_rows.set_index("project_id")
@@ -1660,62 +1672,46 @@ def add_hours_per_week(
         except (TypeError, ValueError):
             return float("inf"), project_id
 
-    ordered_projects = sorted(project_rows.index.tolist(), key=_project_sort_key)
+    ordered_projects = sorted(totals_by_project.index.tolist(), key=_project_sort_key)
     color_map = project_color_map or {}
 
-    data_start_ts = pd.Timestamp(data_start)
-    data_end_ts = pd.Timestamp(data_end)
+    week_index_map = {pd.Timestamp(ws): idx for idx, ws in enumerate(week_starts)}
     added_trace = False
 
     for project_id in ordered_projects:
-        reported_hours = float(hours_by_project.get(project_id, 0.0))
-        if reported_hours <= 0:
+        total_hours = float(totals_by_project.get(project_id, 0.0) or 0.0)
+        if total_hours <= 0:
             continue
 
-        row = project_rows.loc[project_id]
-        project_start = row.get("start_date")
-        if pd.isna(project_start):
-            continue
-        project_start = pd.Timestamp(project_start)
+        if project_id in project_rows.index:
+            row = project_rows.loc[project_id]
+        else:
+            row = pd.Series({"project_id": project_id, "project_name": project_id})
 
         status_val = str(row.get("status", "Active")).strip()
         if status_val == "Closed":
-            project_end = row.get("actual_end_date")
-            if pd.isna(project_end):
-                continue
-            project_end = pd.Timestamp(project_end)
             alpha = 0.18
         else:
-            expected_end = _resolve_expected_end(row)
-            project_end = expected_end if expected_end is not None else data_end_ts
             alpha = 1.0 if status_val == "Active" else 0.25
 
-        active_start = max(project_start, data_start_ts)
-        active_end = min(project_end, data_end_ts)
-        if active_end < active_start:
-            continue
+        y_vals = [0.0] * len(week_starts)
+        project_weekly = weekly_hours.loc[weekly_hours["project_id"] == project_id]
+        for _, wrow in project_weekly.iterrows():
+            week_start = wrow.get("__week_start")
+            if pd.isna(week_start):
+                continue
+            idx = week_index_map.get(pd.Timestamp(week_start))
+            if idx is None:
+                continue
+            y_vals[idx] = float(wrow.get("week_hours", 0.0) or 0.0)
 
-        active = (week_ends >= active_start) & (week_starts <= active_end)
-        if not active.any():
+        if not any(v > 0 for v in y_vals):
             continue
-        total_active_weeks = int(active.sum())
-        if total_active_weeks == 0:
-            continue
-
-        per_week = reported_hours / total_active_weeks
-        y_vals = [per_week if is_active else 0.0 for is_active in active.tolist()]
 
         base_color = color_map.get(project_id, BASE_BLACK)
         marker_color = base_color if alpha >= 1.0 else hex_to_rgba(base_color, alpha)
         tick_text = ["✓" if v > 0 else "" for v in y_vals] if status_val == "Closed" else None
-        hover_text = build_hover_text(
-            row,
-            extra={
-                "reported_hours": f"{reported_hours:.2f}",
-                "active_weeks": total_active_weeks,
-                "hours_per_week": f"{per_week:.2f}",
-            },
-        )
+        hover_text = build_hover_text(row, extra={"period_hours": f"{total_hours:.2f}"})
 
         fig.add_trace(
             go.Bar(
@@ -1728,7 +1724,7 @@ def add_hours_per_week(
                 textposition="inside",
                 textfont=dict(color=BASE_GREEN, size=14),
                 hovertext=[hover_text] * len(y_vals),
-                hovertemplate="%{hovertext}<br>Week starting %{x|%Y-%m-%d}<br>Hours/week=%{y:.2f}<extra></extra>",
+                hovertemplate="%{hovertext}<br>Week starting %{x|%Y-%m-%d}<br>Hours=%{y:.2f}<extra></extra>",
                 showlegend=False,
             ),
             row=subplot_row,
@@ -2219,21 +2215,85 @@ def build_hours_figure(
     return fig
 
 
+def _to_float_list(values: Any) -> List[float]:
+    out: List[float] = []
+    if values is None:
+        return out
+    for v in list(values):
+        try:
+            out.append(float(v))
+        except (TypeError, ValueError):
+            out.append(0.0)
+    return out
+
+
+def build_percentage_figure_from_hours(hours_fig: go.Figure) -> go.Figure:
+    fig = go.Figure(hours_fig.to_dict())
+
+    totals_by_axis: Dict[str, float] = {}
+    for trace in fig.data:
+        if getattr(trace, "type", None) != "bar":
+            continue
+        axis_id = getattr(trace, "yaxis", None) or "y"
+        y_vals = _to_float_list(getattr(trace, "y", None))
+        totals_by_axis[axis_id] = totals_by_axis.get(axis_id, 0.0) + sum(y_vals)
+
+    for trace in fig.data:
+        if getattr(trace, "type", None) != "bar":
+            continue
+        axis_id = getattr(trace, "yaxis", None) or "y"
+        denom = totals_by_axis.get(axis_id, 0.0)
+        if denom <= 0:
+            continue
+
+        y_orig = _to_float_list(getattr(trace, "y", None))
+        trace.customdata = y_orig
+        trace.y = [v * 100.0 / denom for v in y_orig]
+
+        ht = getattr(trace, "hovertemplate", None) or ""
+        if ht and "<extra></extra>" in ht:
+            body, _ = ht.split("<extra></extra>", 1)
+        else:
+            body = ht
+
+        if "%{y" in body:
+            body = (
+                body.replace("Total hours=%{y:.2f}", "Total hours=%{customdata:.2f}")
+                .replace("Hours=%{y:.2f}", "Hours=%{customdata:.2f}")
+                .replace("Weight=%{y:.2f}", "Weight=%{customdata:.2f}")
+            )
+        if "Percent=%{y" not in body:
+            body = body + "<br>Percent=%{y:.1f}%"
+        trace.hovertemplate = body + "<extra></extra>"
+
+    def _update_axis(axis: Any) -> None:
+        axis.title = dict(text="Percent")
+        axis.ticksuffix = "%"
+        axis.tickformat = ".0f"
+        axis.range = [0, 100]
+
+    fig.for_each_yaxis(_update_axis)
+    return fig
+
+
 # ----------------------------
 # Export
 # ----------------------------
 def write_tabbed_html(
     counts_fig: go.Figure,
     hours_fig: go.Figure,
+    percentage_fig: go.Figure,
     out_html_path: str,
     header_context: Dict[str, Any],
     tables_html: str,
     hours_metrics_html: str,
+    percentage_metrics_html: str,
     nn_pie_html: str,
     nn_note: Optional[str],
 ) -> None:
     counts_html = pio.to_html(counts_fig, include_plotlyjs=False, full_html=False, div_id="counts-fig")
     hours_html = pio.to_html(hours_fig, include_plotlyjs=False, full_html=False, div_id="hours-fig")
+    percentage_html = pio.to_html(percentage_fig, include_plotlyjs=False, full_html=False, div_id="percentage-fig")
     plotly_cdn = _plotly_cdn_src()
 
     title_text = html.escape(str(header_context.get("title_text", "Project Portfolio Overview")))
@@ -2331,6 +2391,7 @@ def write_tabbed_html(
       gap: 8px;
       margin: 4px 0 12px;
       padding-bottom: 12px;
+      flex-wrap: wrap;
     }}
     .tab-btn {{
       padding: 8px 16px;
@@ -2413,6 +2474,10 @@ def write_tabbed_html(
     .hours-project-total {{
       font-variant-numeric: tabular-nums;
     }}
+    .hours-project-percent {{
+      color: #444;
+      font-weight: 600;
+    }}
     .hours-project-entries {{
       margin-top: 8px;
       padding-left: 1.2em;
@@ -2436,6 +2501,12 @@ def write_tabbed_html(
     }}
     .hours-entry-duration {{
       width: 110px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }}
+    .hours-entry-percent {{
+      width: 90px;
       text-align: right;
       font-variant-numeric: tabular-nums;
       white-space: nowrap;
@@ -2518,6 +2589,7 @@ def write_tabbed_html(
       <div class="tabs">
         <button class="tab-btn active" id="btn-counts" onclick="showTab('counts')">Counts</button>
         <button class="tab-btn" id="btn-hours" onclick="showTab('hours')">Hours</button>
+        <button class="tab-btn" id="btn-percentage" onclick="showTab('percentage')">Percentage</button>
       </div>
     </div>
 
@@ -2527,6 +2599,10 @@ def write_tabbed_html(
     <div class="tab-panel" id="tab-hours">
       <div class="hours-metrics">{hours_metrics_html}</div>
       {hours_html}
+    </div>
+    <div class="tab-panel" id="tab-percentage">
+      <div class="hours-metrics">{percentage_metrics_html}</div>
+      {percentage_html}
     </div>
 
     <div class="project-info-section">
@@ -2539,8 +2615,10 @@ def write_tabbed_html(
     function showTab(name) {{
       document.getElementById("tab-counts").classList.remove("active");
       document.getElementById("tab-hours").classList.remove("active");
+      document.getElementById("tab-percentage").classList.remove("active");
       document.getElementById("btn-counts").classList.remove("active");
       document.getElementById("btn-hours").classList.remove("active");
+      document.getElementById("btn-percentage").classList.remove("active");
       document.getElementById("tab-" + name).classList.add("active");
       document.getElementById("btn-" + name).classList.add("active");
       var figId = name + "-fig";
@@ -2603,6 +2681,7 @@ def write_multi_period_tabbed_html(
     period_nn_pie_block_parts: List[str] = []
     period_counts_panels_parts: List[str] = []
     period_hours_panels_parts: List[str] = []
+    period_percentage_panels_parts: List[str] = []
 
     group_labels: Dict[str, str] = {}
     if "weekly" in period_payloads:
@@ -2680,11 +2759,15 @@ def write_multi_period_tabbed_html(
 
         counts_fig = payload["counts_fig"]
         hours_fig = payload["hours_fig"]
+        percentage_fig = payload["percentage_fig"]
         counts_div_id = f"counts-fig-{period_id}"
         hours_div_id = f"hours-fig-{period_id}"
+        percentage_div_id = f"percentage-fig-{period_id}"
         counts_html = pio.to_html(counts_fig, include_plotlyjs=False, full_html=False, div_id=counts_div_id)
         hours_html = pio.to_html(hours_fig, include_plotlyjs=False, full_html=False, div_id=hours_div_id)
+        percentage_html = pio.to_html(percentage_fig, include_plotlyjs=False, full_html=False, div_id=percentage_div_id)
         hours_metrics_html = payload.get("hours_metrics_html") or ""
+        percentage_metrics_html = payload.get("percentage_metrics_html") or hours_metrics_html
 
         period_counts_panels_parts.append(
             (
@@ -2701,6 +2784,15 @@ def write_multi_period_tabbed_html(
                 "</div>"
             )
         )
+        period_percentage_panels_parts.append(
+            (
+                f"<div class=\"period-panel{' active' if is_default else ''}\" "
+                f"id=\"period-percentage-{period_id}\">"
+                f"<div class=\"hours-metrics\">{percentage_metrics_html}</div>"
+                f"{percentage_html}"
+                "</div>"
+            )
+        )
 
     period_group_buttons_html = "\n".join(period_group_buttons_html_parts)
     month_buttons_html = "\n".join(month_buttons_html_parts)
@@ -2709,6 +2801,7 @@ def write_multi_period_tabbed_html(
     nn_pie_blocks_html = "\n".join(period_nn_pie_block_parts)
     counts_panels_html = "\n".join(period_counts_panels_parts)
     hours_panels_html = "\n".join(period_hours_panels_parts)
+    percentage_panels_html = "\n".join(period_percentage_panels_parts)
 
     html_content = f"""<!doctype html>
 <html lang="en">
@@ -2909,6 +3002,10 @@ def write_multi_period_tabbed_html(
     .hours-project-total {{
       font-variant-numeric: tabular-nums;
     }}
+    .hours-project-percent {{
+      color: #444;
+      font-weight: 600;
+    }}
     .hours-project-entries {{
       margin-top: 8px;
       padding-left: 1.2em;
@@ -2932,6 +3029,12 @@ def write_multi_period_tabbed_html(
     }}
     .hours-entry-duration {{
       width: 110px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }}
+    .hours-entry-percent {{
+      width: 90px;
       text-align: right;
       font-variant-numeric: tabular-nums;
       white-space: nowrap;
@@ -3014,6 +3117,7 @@ def write_multi_period_tabbed_html(
       <div class="tabs">
         <button class="tab-btn active" id="btn-counts" onclick="showTab('counts')">Counts</button>
         <button class="tab-btn" id="btn-hours" onclick="showTab('hours')">Hours</button>
+        <button class="tab-btn" id="btn-percentage" onclick="showTab('percentage')">Percentage</button>
       </div>
 
       <div class="tabs">
@@ -3029,6 +3133,9 @@ def write_multi_period_tabbed_html(
     </div>
     <div class="tab-panel" id="tab-hours">
       {hours_panels_html}
+    </div>
+    <div class="tab-panel" id="tab-percentage">
+      {percentage_panels_html}
     </div>
 
     <div class="project-info-section">
@@ -3067,8 +3174,10 @@ def write_multi_period_tabbed_html(
     function updateView() {{
       document.getElementById("tab-counts").classList.toggle("active", currentTab === "counts");
       document.getElementById("tab-hours").classList.toggle("active", currentTab === "hours");
+      document.getElementById("tab-percentage").classList.toggle("active", currentTab === "percentage");
       document.getElementById("btn-counts").classList.toggle("active", currentTab === "counts");
       document.getElementById("btn-hours").classList.toggle("active", currentTab === "hours");
+      document.getElementById("btn-percentage").classList.toggle("active", currentTab === "percentage");
 
       var isMonthly = currentPeriodId && currentPeriodId.startsWith("monthly-");
       var activeGroup = isMonthly ? "monthly" : currentPeriodId;
@@ -3098,11 +3207,15 @@ def write_multi_period_tabbed_html(
       }});
       var countsPanel = document.getElementById("period-counts-" + currentPeriodId);
       var hoursPanel = document.getElementById("period-hours-" + currentPeriodId);
+      var percentagePanel = document.getElementById("period-percentage-" + currentPeriodId);
       if (countsPanel) {{
         countsPanel.classList.add("active");
       }}
       if (hoursPanel) {{
         hoursPanel.classList.add("active");
+      }}
+      if (percentagePanel) {{
+        percentagePanel.classList.add("active");
       }}
 
       document.querySelectorAll(".period-meta").forEach(function(el) {{
@@ -3156,6 +3269,7 @@ def write_multi_period_tabbed_html(
 def export_tabbed_report(
     counts_fig: go.Figure,
     hours_fig: go.Figure,
+    percentage_fig: go.Figure,
     output_dir: str,
     output_archive_dir: str,
     base_name: str,
@@ -3164,6 +3278,7 @@ def export_tabbed_report(
     header_context: Dict[str, Any],
     tables_html: str,
     hours_metrics_html: str,
+    percentage_metrics_html: str,
     nn_pie_html: str,
     nn_note: Optional[str],
 ) -> Tuple[str, str]:
@@ -3177,10 +3292,12 @@ def export_tabbed_report(
     write_tabbed_html(
         counts_fig,
         hours_fig,
+        percentage_fig,
         html_path,
         header_context,
         tables_html,
         hours_metrics_html,
+        percentage_metrics_html,
         nn_pie_html,
         nn_note,
     )
@@ -3283,6 +3400,7 @@ def generate_reports(report_type: str, asof_date: date) -> None:
             nn_note = None
             nn_pie_html = ""
             hours_metrics_html = ""
+            percentage_metrics_html = ""
             if rtype == "yearly":
                 if nn_df is None:
                     nn_note = nn_status
@@ -3292,8 +3410,10 @@ def generate_reports(report_type: str, asof_date: date) -> None:
                         nn_note = f"NN_maandelijks: {nn_note}"
                 nn_pie_html = build_nn_pie_html(nn_summary, div_id=f"nn-pie-{rtype}")
                 hours_metrics_html = build_nn_metrics_html(nn_summary, nn_note)
+                percentage_metrics_html = hours_metrics_html
             else:
                 hours_metrics_html = build_logged_hours_breakdown_html(time_entries_filtered)
+                percentage_metrics_html = build_logged_hours_breakdown_html(time_entries_filtered, show_percentage=True)
 
             projects_for_counts = projects_df
             if rtype in ("weekly", "biweekly"):
@@ -3318,13 +3438,16 @@ def generate_reports(report_type: str, asof_date: date) -> None:
                 period_label,
                 report_type=rtype,
             )
+            percentage_fig = build_percentage_figure_from_hours(hours_fig)
 
             period_payloads[rtype] = dict(
                 label=period_label,
                 period_range=f"{period_start.isoformat()} to {period_end.isoformat()}",
                 counts_fig=counts_fig,
                 hours_fig=hours_fig,
+                percentage_fig=percentage_fig,
                 hours_metrics_html=hours_metrics_html,
+                percentage_metrics_html=percentage_metrics_html,
                 nn_pie_html=nn_pie_html,
                 nn_note=nn_note,
             )
@@ -3342,6 +3465,7 @@ def generate_reports(report_type: str, asof_date: date) -> None:
             nn_note = None
             nn_pie_html = ""
             hours_metrics_html = ""
+            percentage_metrics_html = ""
             if nn_df is None:
                 nn_note = nn_status
             else:
@@ -3350,6 +3474,7 @@ def generate_reports(report_type: str, asof_date: date) -> None:
                     nn_note = f"NN_maandelijks: {nn_note}"
             nn_pie_html = build_nn_pie_html(nn_summary, div_id=f"nn-pie-{period_id}")
             hours_metrics_html = build_nn_metrics_html(nn_summary, nn_note)
+            percentage_metrics_html = hours_metrics_html
 
             projects_for_counts = filter_projects_with_hours(projects_df, time_entries_filtered)
             counts_fig = build_counts_figure(
@@ -3371,13 +3496,16 @@ def generate_reports(report_type: str, asof_date: date) -> None:
                 period_label,
                 report_type="monthly",
             )
+            percentage_fig = build_percentage_figure_from_hours(hours_fig)
 
             period_payloads[period_id] = dict(
                 label=period_label,
                 period_range=f"{period_start.isoformat()} to {period_end.isoformat()}",
                 counts_fig=counts_fig,
                 hours_fig=hours_fig,
+                percentage_fig=percentage_fig,
                 hours_metrics_html=hours_metrics_html,
+                percentage_metrics_html=percentage_metrics_html,
                 nn_pie_html=nn_pie_html,
                 nn_note=nn_note,
             )
@@ -3419,6 +3547,7 @@ def generate_reports(report_type: str, asof_date: date) -> None:
     nn_note = None
     nn_pie_html = ""
     hours_metrics_html = ""
+    percentage_metrics_html = ""
     if rtype in ("monthly", "yearly"):
         if nn_df is None:
             nn_note = nn_status
@@ -3428,8 +3557,10 @@ def generate_reports(report_type: str, asof_date: date) -> None:
                 nn_note = f"NN_maandelijks: {nn_note}"
         nn_pie_html = build_nn_pie_html(nn_summary)
         hours_metrics_html = build_nn_metrics_html(nn_summary, nn_note)
+        percentage_metrics_html = hours_metrics_html
     if rtype in ("weekly", "biweekly"):
         hours_metrics_html = build_logged_hours_breakdown_html(time_entries_filtered)
+        percentage_metrics_html = build_logged_hours_breakdown_html(time_entries_filtered, show_percentage=True)
 
     projects_for_counts = projects_df
     if rtype in ("weekly", "biweekly", "monthly"):
@@ -3454,6 +3585,7 @@ def generate_reports(report_type: str, asof_date: date) -> None:
         period_label,
         report_type=rtype,
     )
+    percentage_fig = build_percentage_figure_from_hours(hours_fig)
 
     period_range = f"{period_start.isoformat()} to {period_end.isoformat()}"
     header_context = dict(
@@ -3480,6 +3612,7 @@ def generate_reports(report_type: str, asof_date: date) -> None:
     html_path, png_path = export_tabbed_report(
         counts_fig,
         hours_fig,
+        percentage_fig,
         REPORT_DIR,
         REPORTS_ARCHIVE_DIR,
         base_name,
@@ -3488,6 +3621,7 @@ def generate_reports(report_type: str, asof_date: date) -> None:
         header_context,
         tables_html,
         hours_metrics_html,
+        percentage_metrics_html,
         nn_pie_html,
         nn_note,
     )

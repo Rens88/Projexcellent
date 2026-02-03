@@ -16,14 +16,17 @@ Over tijd plot:
 Ideetjes om rapportage te verbeteren:
 -> prioritering printen zodat ik weet waar ik aan moet werken?
 
-
+- Make "per theme" plot a word cloud
 
 
 **IN PROGRESS**
-
-	
+- In the percentage tab, update the table in the 1- and 2-weeks overview that shows the logged hours by project. Update it to reflect percentage as well, all with respect to the total number of hours logged during that time period.
 
 **DONE**
+BUG FIXED -> Looks like there is a bug in timeseries plot for Month. It shows same hours every week but it should be aggregated at week level so each week should show different number of hours. Similarly, the year to date plot also doesn't have different hours per week.
+- Next to Counts and Hours, create a third option called "Percentage". It should be almost like a copy of the "Hours" tab, but instead of showing the absolute hours on the vertical axis, it should show the percentage. The total is always all the hours that are plotted in a plot. So the plots will look exactly like the hours plots, but will have the precentage on the vertical axis. The sum of all plotted bars in a single plot should always be 100.
+
+**COMMITTED**
 - Reorganize buttoning. 
 -> If Month is selected, fold-out an extra row of buttons showing all completed months, by default selecting the most recently finished month, but allowing the user to also select months further in the past.
 -> Rename the button "Year" to "Year (to-date)"
@@ -33,7 +36,6 @@ Ideetjes om rapportage te verbeteren:
 - In the weekly and biweekly report, add a tabular display of the logged hours for that week aggregated by project sorted by the project on which I spent the most hours. Add a unfold/fold functionality to expand each project to see which specific entries were made. this should show "WhatIDid" and "duration_hours" and should also be sorted by duration_hours.
 
 
-**COMMITTED**
 - Generate one file
 - Add biweekly report.
 
