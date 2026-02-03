@@ -7,9 +7,6 @@ MWAH - Gefactureerde uren uitdrukken als percentage gewerkte uren
 MWAH - Tot nu toe gefactueerde uren uitdrukken als percentage beschikbare uren
 MWAH - Expliciet melden wanneer uren opzet obv "nog niet ingepland" als Sport Science Centre uren
 
-Over tijd plot:
-- Alleen actieve projecten volle kleur (al gedaan?)
-
 - Iets doen met "hours_cap": Projectoverzicht tabellen ordenen op percentage hours_cap? Kleur geven als 80% (oranje) en 100% (rood) is overschreden?
 - Add a "Closed Projects" tab that summarizes the closed projects, including a visual of what was delivered (which I need to come up with a workflo for. Perhaps add a folder "deliverables" to each project folder? Or products. Perhaps braintstorm a bit about this..
 -- 
@@ -20,13 +17,152 @@ Ideetjes om rapportage te verbeteren:
 
 
 **IN PROGRESS**
-- In the percentage tab, update the table in the 1- and 2-weeks overview that shows the logged hours by project. Update it to reflect percentage as well, all with respect to the total number of hours logged during that time period.
+- Update formatting of finished projects
+-> Opacity: Alleen actieve projecten volle kleur (al gedaan?)
+-> Stacking order (finished sink to bottom)
+-> Hover: states status and end date
+
+<codex_instruction>
+You are editing the Python script that generates the Plotly report: Code/make_report.py 
+Implement these changes:
+
+Remove checkmark functionality completely
+
+Search the entire file for any code that draws or adds a checkmark for completed/closed projects. This can include:
+
+layout annotations with text containing "✓" or "✔"
+
+scatter traces used only to draw a check mark
+
+shapes that form a check mark
+
+any “checkmark” variables, helpers, or conditional branches
+
+Delete that logic entirely so no checkmarks appear anywhere in the HTML or PNG output.
+
+Closed projects: opacity 0.4 + slightly desaturated
+Definition:
+
+Treat a project as “closed” if status (string) lowercased is not equal to "active".
+
+Active if status.lower() == "active".
+
+Implementation:
+
+Create a small helper function used by all plot builders that returns (color, opacity) based on status.
+
+Input: base_color_hex (e.g. from project_color_map), status string
+
+Output:
+
+marker_color_hex: base color for active; slightly desaturated for closed
+
+opacity: 1.0 for active; 0.4 for closed (exactly 0.4)
+
+Desaturation requirement:
+
+Keep it subtle: the closed block should still look like the same project color, just muted.
+
+Implement desaturation by mixing the base color toward a neutral gray.
+
+Example approach (recommended):
+
+Convert hex -> RGB
+
+Blend with gray (e.g. 140,140,140) using a small blend factor like 0.25–0.35
+
+Convert back to hex
+
+Do NOT change the palette assignment logic; only modify the final color used for closed traces.
+
+Apply this helper consistently in all stacked bar charts:
+
+add_stacked_project_count_bars()
+
+add_stacked_hours_bars()
+
+add_trend_started_closed()
+
+In each place where a project bar trace is added:
+
+Set trace.opacity to the returned opacity
+
+Set marker_color to the returned color
+
+Remove any old opacity rules that differ (for example, the weekly chart currently uses 0.5 for non-active; change it to 0.4 and also apply desaturation).
+
+Hover: add explicit status and explicit end-date
+Goal:
+
+Hover must explicitly show:
+
+Status (always present)
+
+End date (always present as a resolved value), even when actual_end_date is missing
+
+Implementation details:
+
+Current hover is built by build_hover_text() using HOVER_KEYS and optional extra fields.
+
+Update hover behavior so that status and a resolved end date always appear:
+
+A) Ensure status is always included
+
+Keep status in HOVER_KEYS, but also enforce a fallback so that if status is missing/empty it shows “Active” or “Unknown” (pick one and use consistently; prefer “Active” only if that matches your data rules).
+
+B) Add a new hover field: end_date_resolved (or similar)
+
+Define “resolved end date” for hover as:
+
+If actual_end_date exists -> use actual_end_date
+
+Else if target_end_date exists -> use target_end_date
+
+Else if start_date exists -> use YYYY-12-31 of the start_date year
+
+Else -> “(no end date)”
+
+Format dates as YYYY-MM-DD strings.
+
+C) Inject the resolved end date into hover for all relevant charts
+
+For add_stacked_project_count_bars() and add_stacked_hours_bars():
+
+When calling build_hover_text(project_row, extra=...), include extra={"resolved_end_date": "..."} (and keep existing extras like total_hours).
+
+For add_trend_started_closed():
+
+It already computes end_date and currently passes “resolved_end_date” into hover_map via extras; make sure the label is explicit and matches the requirement (e.g. “resolved_end_date” or “end_date”).
+
+Also ensure status is present in the hover even if missing in source.
+
+Constraints / do-not-dos:
+
+Do not add any new on-chart text/annotations/legends explaining the opacity rule.
+
+Do not add pattern fills/hatching.
+
+Do not change chart titles, axis titles, or layout aside from what’s necessary for the above.
+
+Keep the existing “Current week” background rectangle in the weekly chart unchanged.
+
+Acceptance checks:
+
+No checkmarks appear anywhere.
+
+Any closed project bar is visibly muted: opacity exactly 0.4 and color slightly desaturated.
+
+Hover for every project bar explicitly includes Status and a resolved end date (YYYY-MM-DD or “(no end date)”).
+</codex_instruction>
 
 **DONE**
-BUG FIXED -> Looks like there is a bug in timeseries plot for Month. It shows same hours every week but it should be aggregated at week level so each week should show different number of hours. Similarly, the year to date plot also doesn't have different hours per week.
-- Next to Counts and Hours, create a third option called "Percentage". It should be almost like a copy of the "Hours" tab, but instead of showing the absolute hours on the vertical axis, it should show the percentage. The total is always all the hours that are plotted in a plot. So the plots will look exactly like the hours plots, but will have the precentage on the vertical axis. The sum of all plotted bars in a single plot should always be 100.
 
 **COMMITTED**
+BUG FIXED -> Looks like there is a bug in timeseries plot for Month. It shows same hours every week but it should be aggregated at week level so each week should show different number of hours. Similarly, the year to date plot also doesn't have different hours per week.
+- Next to Counts and Hours, create a third option called "Percentage". It should be almost like a copy of the "Hours" tab, but instead of showing the absolute hours on the vertical axis, it should show the percentage. The total is always all the hours that are plotted in a plot. So the plots will look exactly like the hours plots, but will have the precentage on the vertical axis. The sum of all plotted bars in a single plot should always be 100.
+- In the percentage tab, update the table in the 1- and 2-weeks overview that shows the logged hours by project. Update it to reflect percentage as well, all with respect to the total number of hours logged during that time period.
+
+
 - Reorganize buttoning. 
 -> If Month is selected, fold-out an extra row of buttons showing all completed months, by default selecting the most recently finished month, but allowing the user to also select months further in the past.
 -> Rename the button "Year" to "Year (to-date)"
@@ -41,3 +177,4 @@ BUG FIXED -> Looks like there is a bug in timeseries plot for Month. It shows sa
 
 - Pie chart
 - Timeseries fix
+

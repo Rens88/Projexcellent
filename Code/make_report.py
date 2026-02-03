@@ -147,6 +147,52 @@ def hex_to_rgba(hex_color: str, alpha: float) -> str:
     return f"rgba({r},{g},{b},{alpha})"
 
 
+def _hex_to_rgb(hex_color: str) -> Optional[Tuple[int, int, int]]:
+    if not isinstance(hex_color, str):
+        return None
+    color = hex_color.strip().lstrip("#")
+    if len(color) != 6:
+        return None
+    try:
+        r, g, b = int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16)
+    except ValueError:
+        return None
+    return r, g, b
+
+
+def _rgb_to_hex(rgb: Tuple[int, int, int]) -> str:
+    r, g, b = rgb
+    return f"#{_clamp_channel(r):02X}{_clamp_channel(g):02X}{_clamp_channel(b):02X}"
+
+
+def desaturate_hex_towards_gray(hex_color: str, blend_factor: float = 0.30, gray_rgb: Tuple[int, int, int] = (140, 140, 140)) -> str:
+    rgb = _hex_to_rgb(hex_color)
+    if rgb is None:
+        return hex_color
+    f = max(0.0, min(1.0, float(blend_factor)))
+    r = _clamp_channel(rgb[0] * (1 - f) + gray_rgb[0] * f)
+    g = _clamp_channel(rgb[1] * (1 - f) + gray_rgb[1] * f)
+    b = _clamp_channel(rgb[2] * (1 - f) + gray_rgb[2] * f)
+    return _rgb_to_hex((r, g, b))
+
+
+def is_active_status(status: Any) -> bool:
+    status_str = str(status).strip() if status is not None else ""
+    return status_str.lower() == "active"
+
+
+def marker_style_for_status(base_color_hex: str, status: Any) -> Tuple[str, float]:
+    """
+    Returns (marker_color_hex, opacity) based on status:
+      - Active if status.lower() == "active" -> base color, opacity=1.0
+      - Closed otherwise -> slightly desaturated color, opacity=0.4
+    """
+    base = base_color_hex or BASE_BLACK
+    if is_active_status(status):
+        return base, 1.0
+    return desaturate_hex_towards_gray(base, blend_factor=0.30), 0.4
+
+
 def build_color_maps(projects_df: pd.DataFrame) -> Tuple[Dict[str, str], Dict[str, str]]:
     """
     Returns:
@@ -544,11 +590,51 @@ HOVER_KEYS = [
 ]
 
 
+def normalize_status_for_display(val: Any) -> str:
+    s = str(val).strip() if val is not None else ""
+    return s if s else "Unknown"
+
+
+def format_date_yyyymmdd(val: Any) -> Optional[str]:
+    ts = parse_date(val)
+    if ts is None:
+        return None
+    return ts.date().isoformat()
+
+
+def resolve_end_date_for_hover(row: pd.Series) -> str:
+    actual = format_date_yyyymmdd(row.get("actual_end_date"))
+    if actual:
+        return actual
+    target = format_date_yyyymmdd(row.get("target_end_date"))
+    if target:
+        return target
+    start = parse_date(row.get("start_date"))
+    if start is not None:
+        return f"{start.year:04d}-12-31"
+    return "(no end date)"
+
+
 def build_hover_text(project_row: pd.Series, extra: Optional[Dict[str, Any]] = None) -> str:
-    parts = []
+    extra = dict(extra) if extra else {}
+
+    status_display = normalize_status_for_display(project_row.get("status") if "status" in project_row else None)
+    resolved_end_date = extra.pop("resolved_end_date", None)
+    if resolved_end_date is None or str(resolved_end_date).strip() == "":
+        resolved_end_date = resolve_end_date_for_hover(project_row)
+
+    parts = [f"<b>Status</b>: {status_display}", f"<b>resolved_end_date</b>: {resolved_end_date}"]
+
     for k in HOVER_KEYS:
+        if k == "status":
+            continue
         if k in project_row and pd.notna(project_row[k]) and str(project_row[k]).strip() != "":
-            parts.append(f"<b>{k}</b>: {project_row[k]}")
+            val = project_row[k]
+            if k in ("start_date", "target_end_date", "actual_end_date"):
+                formatted = format_date_yyyymmdd(val)
+                if formatted is not None:
+                    val = formatted
+            parts.append(f"<b>{k}</b>: {val}")
     if "__project_folder" in project_row and pd.notna(project_row["__project_folder"]):
         parts.append(f"<b>folder</b>: {project_row['__project_folder']}")
     if extra:
@@ -1288,9 +1374,14 @@ def add_stacked_project_count_bars(
     groups = sorted(all_groups, key=lambda g: (-group_counts.get(g, 0), str(g)))
     fig.update_xaxes(categoryorder="array", categoryarray=groups, row=subplot_row, col=1)
 
+    # Stacking order: first traces are at the bottom; ensure closed projects sit below active ones.
+    project_groups.sort(key=lambda item: 1 if is_active_status(item[0].get("status")) else 0)
+
     for project, values in project_groups:
-        hover = build_hover_text(project)
-        project_id = project.get("project_id")
+        project_id = str(project.get("project_id", "")).strip()
+        base_color = project_color_map.get(project_id, BASE_BLACK)
+        marker_color, opacity = marker_style_for_status(base_color, project.get("status"))
+        hover = build_hover_text(project, extra={"resolved_end_date": resolve_end_date_for_hover(project)})
         bar_name = str(project.get("project_name", project.get("project_id", "project")))
 
         for group_val in values:
@@ -1300,7 +1391,8 @@ def add_stacked_project_count_bars(
                     y=[1],
                     name=bar_name,
                     hovertemplate=hover + "<extra></extra>",
-                    marker_color=project_color_map.get(project_id, BASE_BLACK),
+                    marker_color=marker_color,
+                    opacity=opacity,
                     showlegend=False,
                 ),
                 row=subplot_row,
@@ -1375,10 +1467,18 @@ def add_stacked_hours_bars(
     groups = sorted(all_groups, key=lambda g: (-group_hours.get(g, 0.0), str(g)))
     fig.update_xaxes(categoryorder="array", categoryarray=groups, row=subplot_row, col=1)
 
+    # Stacking order: first traces are at the bottom; ensure closed projects sit below active ones.
+    project_groups.sort(key=lambda item: 1 if is_active_status(item[0].get("status")) else 0)
+
     for project, values in project_groups:
         hours = float(project.get("total_hours", 0.0))
-        hover = build_hover_text(project, extra={"total_hours": f"{hours:.2f}"})
-        project_id = project.get("project_id")
+        project_id = str(project.get("project_id", "")).strip()
+        base_color = project_color_map.get(project_id, BASE_BLACK)
+        marker_color, opacity = marker_style_for_status(base_color, project.get("status"))
+        hover = build_hover_text(
+            project,
+            extra={"total_hours": f"{hours:.2f}", "resolved_end_date": resolve_end_date_for_hover(project)},
+        )
 
         for group_val in values:
             fig.add_trace(
@@ -1387,7 +1487,8 @@ def add_stacked_hours_bars(
                     y=[hours],
                     name=str(project.get("project_name", project.get("project_id", "project"))),
                     hovertemplate=hover + "<extra></extra>",
-                    marker_color=project_color_map.get(project_id, BASE_BLACK),
+                    marker_color=marker_color,
+                    opacity=opacity,
                     showlegend=False,
                 ),
                 row=subplot_row,
@@ -1483,6 +1584,8 @@ def add_trend_started_closed(
             return float("inf"), project_id
 
     ordered_projects = sorted(project_rows.index.tolist(), key=_project_sort_key)
+    # Stacking order: first traces are at the bottom; ensure closed projects sit below active ones.
+    ordered_projects.sort(key=lambda pid: 1 if is_active_status(project_rows.loc[pid].get("status")) else 0)
     color_map = project_color_map or {}
 
     for project_id in ordered_projects:
@@ -1492,17 +1595,15 @@ def add_trend_started_closed(
             continue
         project_start = pd.Timestamp(project_start)
 
-        status_val = str(row.get("status", "Active")).strip()
-        if status_val == "Closed":
+        status_val = normalize_status_for_display(row.get("status"))
+        if status_val.lower() == "closed":
             project_end = row.get("actual_end_date")
             if pd.isna(project_end):
                 continue
             project_end = pd.Timestamp(project_end)
-            alpha = 0.18
         else:
             expected_end = _resolve_expected_end(row)
             project_end = expected_end if expected_end is not None else pd.Timestamp(year_end)
-            alpha = 1.0 if status_val == "Active" else 0.25
 
         active = (week_ends >= project_start) & (week_starts <= project_end)
         if not active.any():
@@ -1510,9 +1611,8 @@ def add_trend_started_closed(
         y_vals = active.astype(int).tolist()
 
         base_color = color_map.get(project_id, BASE_BLACK)
-        marker_color = base_color if alpha >= 1.0 else hex_to_rgba(base_color, alpha)
-        tick_text = ["✓" if v == 1 else "" for v in y_vals] if status_val == "Closed" else None
-        hover_text = build_hover_text(row)
+        marker_color, opacity = marker_style_for_status(base_color, status_val)
+        hover_text = build_hover_text(row, extra={"resolved_end_date": resolve_end_date_for_hover(row)})
 
         fig.add_trace(
             go.Bar(
@@ -1521,9 +1621,7 @@ def add_trend_started_closed(
                 name=project_id,
                 width=[bar_width_ms] * len(y_vals),
                 marker_color=marker_color,
-                text=tick_text,
-                textposition="inside",
-                textfont=dict(color=BASE_GREEN, size=14),
+                opacity=opacity,
                 hovertext=[hover_text] * len(y_vals),
                 hovertemplate="%{hovertext}<br>Week starting %{x|%Y-%m-%d}<br>Active=%{y}<extra></extra>",
                 showlegend=False,
@@ -1673,6 +1771,14 @@ def add_hours_per_week(
             return float("inf"), project_id
 
     ordered_projects = sorted(totals_by_project.index.tolist(), key=_project_sort_key)
+    # Stacking order: first traces are at the bottom; ensure closed projects sit below active ones.
+    status_by_project: Dict[str, Any] = {}
+    if not projects_df.empty and "project_id" in projects_df.columns:
+        for _, prow in projects_df.iterrows():
+            pid = str(prow.get("project_id", "")).strip()
+            if pid and pid not in status_by_project:
+                status_by_project[pid] = prow.get("status")
+    ordered_projects.sort(key=lambda pid: 1 if is_active_status(status_by_project.get(pid)) else 0)
     color_map = project_color_map or {}
 
     week_index_map = {pd.Timestamp(ws): idx for idx, ws in enumerate(week_starts)}
@@ -1687,12 +1793,6 @@ def add_hours_per_week(
             row = project_rows.loc[project_id]
         else:
             row = pd.Series({"project_id": project_id, "project_name": project_id})
-
-        status_val = str(row.get("status", "Active")).strip()
-        if status_val == "Closed":
-            alpha = 0.18
-        else:
-            alpha = 1.0 if status_val == "Active" else 0.25
 
         y_vals = [0.0] * len(week_starts)
         project_weekly = weekly_hours.loc[weekly_hours["project_id"] == project_id]
@@ -1709,9 +1809,11 @@ def add_hours_per_week(
             continue
 
         base_color = color_map.get(project_id, BASE_BLACK)
-        marker_color = base_color if alpha >= 1.0 else hex_to_rgba(base_color, alpha)
-        tick_text = ["✓" if v > 0 else "" for v in y_vals] if status_val == "Closed" else None
-        hover_text = build_hover_text(row, extra={"period_hours": f"{total_hours:.2f}"})
+        marker_color, opacity = marker_style_for_status(base_color, row.get("status"))
+        hover_text = build_hover_text(
+            row,
+            extra={"period_hours": f"{total_hours:.2f}", "resolved_end_date": resolve_end_date_for_hover(row)},
+        )
 
         fig.add_trace(
             go.Bar(
@@ -1720,9 +1822,7 @@ def add_hours_per_week(
                 name=project_id,
                 width=[bar_width_ms] * len(y_vals),
                 marker_color=marker_color,
-                text=tick_text,
-                textposition="inside",
-                textfont=dict(color=BASE_GREEN, size=14),
+                opacity=opacity,
                 hovertext=[hover_text] * len(y_vals),
                 hovertemplate="%{hovertext}<br>Week starting %{x|%Y-%m-%d}<br>Hours=%{y:.2f}<extra></extra>",
                 showlegend=False,
@@ -1843,6 +1943,8 @@ def add_estimated_magnitude_per_week(
             return float("inf"), project_id
 
     ordered_projects = sorted(project_rows.index.tolist(), key=_project_sort_key)
+    # Stacking order: first traces are at the bottom; ensure closed projects sit below active ones.
+    ordered_projects.sort(key=lambda pid: 1 if is_active_status(project_rows.loc[pid].get("status")) else 0)
     color_map = project_color_map or {}
 
     for project_id in ordered_projects:
@@ -1852,17 +1954,15 @@ def add_estimated_magnitude_per_week(
             continue
         project_start = pd.Timestamp(project_start)
 
-        status_val = str(row.get("status", "Active")).strip()
-        if status_val == "Closed":
+        status_val = normalize_status_for_display(row.get("status"))
+        if status_val.lower() == "closed":
             project_end = row.get("actual_end_date")
             if pd.isna(project_end):
                 continue
             project_end = pd.Timestamp(project_end)
-            alpha = 0.18
         else:
             expected_end = _resolve_expected_end(row)
             project_end = expected_end if expected_end is not None else pd.Timestamp(year_end)
-            alpha = 1.0 if status_val == "Active" else 0.25
 
         active = (week_ends >= project_start) & (week_starts <= project_end)
         total_week_start = project_start - pd.Timedelta(days=project_start.weekday())
@@ -1878,9 +1978,15 @@ def add_estimated_magnitude_per_week(
         y_vals = [per_week if is_active else 0.0 for is_active in active.tolist()]
 
         base_color = color_map.get(project_id, BASE_BLACK)
-        marker_color = base_color if alpha >= 1.0 else hex_to_rgba(base_color, alpha)
-        tick_text = ["✓" if v > 0 else "" for v in y_vals] if status_val == "Closed" else None
-        hover_text = build_hover_text(row, extra={"estimated_magnitude": magnitude_value, "weight": weight})
+        marker_color, opacity = marker_style_for_status(base_color, status_val)
+        hover_text = build_hover_text(
+            row,
+            extra={
+                "estimated_magnitude": magnitude_value,
+                "weight": weight,
+                "resolved_end_date": resolve_end_date_for_hover(row),
+            },
+        )
 
         fig.add_trace(
             go.Bar(
@@ -1889,9 +1995,7 @@ def add_estimated_magnitude_per_week(
                 name=project_id,
                 width=[bar_width_ms] * len(y_vals),
                 marker_color=marker_color,
-                text=tick_text,
-                textposition="inside",
-                textfont=dict(color=BASE_GREEN, size=14),
+                opacity=opacity,
                 hovertext=[hover_text] * len(y_vals),
                 hovertemplate="%{hovertext}<br>Week starting %{x|%Y-%m-%d}<br>Weight=%{y:.2f}<extra></extra>",
                 showlegend=False,
@@ -2007,8 +2111,18 @@ def add_reported_hours_per_project(
         label = f"{project_name} ({project_id})" if project_name else project_id
         labels.append(label)
         hours.append(float(row.get("total_hours", 0.0)))
-        colors.append(color_map.get(project_id, BASE_BLACK))
-        hovers.append(build_hover_text(row, extra={"total_hours": f"{row.get('total_hours', 0.0):.2f}"}))
+        base_color = color_map.get(project_id, BASE_BLACK)
+        marker_color, opacity = marker_style_for_status(base_color, row.get("status"))
+        colors.append(hex_to_rgba(marker_color, opacity) if opacity < 1.0 else marker_color)
+        hovers.append(
+            build_hover_text(
+                row,
+                extra={
+                    "total_hours": f"{row.get('total_hours', 0.0):.2f}",
+                    "resolved_end_date": resolve_end_date_for_hover(row),
+                },
+            )
+        )
 
     fig.add_trace(
         go.Bar(
