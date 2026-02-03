@@ -601,8 +601,39 @@ def compute_report_periods(asof_date: date) -> Dict[str, Dict[str, Any]]:
         "weekly": dict(label="1-week", start=weekly_start, end=weekly_end, key=week_key),
         "biweekly": dict(label="2-weeks", start=biweekly_start, end=biweekly_end, key=biweek_key),
         "monthly": dict(label="Month", start=monthly_start, end=monthly_end, key=month_key),
-        "yearly": dict(label="Year", start=yearly_start, end=yearly_end, key=year_key),
+        "yearly": dict(label="Year (to-date)", start=yearly_start, end=yearly_end, key=year_key),
     }
+
+
+def list_completed_month_periods(asof_date: date, time_entries_df: Optional[pd.DataFrame] = None) -> List[Dict[str, Any]]:
+    """
+    Returns completed month periods (start/end/key/label), newest-first, ending at the last fully completed month
+    before `asof_date`.
+
+    If time_entries_df is provided, the earliest month is derived from the earliest available time entry date;
+    otherwise only the last completed month is returned.
+    """
+    last_start, last_end, _ = _last_completed_month(asof_date)
+    start_month = last_start
+
+    if time_entries_df is not None and not time_entries_df.empty and "date" in time_entries_df.columns:
+        dates = pd.to_datetime(time_entries_df["date"], errors="coerce").dropna()
+        if not dates.empty:
+            min_date = dates.min().date()
+            if min_date <= last_end:
+                start_month = date(min_date.year, min_date.month, 1)
+
+    month_starts = pd.date_range(pd.Timestamp(start_month), pd.Timestamp(last_start), freq="MS")
+    periods: List[Dict[str, Any]] = []
+    for month_start in month_starts:
+        ms = month_start.date()
+        me = (month_start + pd.offsets.MonthEnd(0)).date()
+        key = f"{ms.year:04d}-{ms.month:02d}"
+        label = month_start.strftime("%b %Y")
+        periods.append(dict(start=ms, end=me, key=key, label=label))
+
+    periods.sort(key=lambda p: p["start"], reverse=True)
+    return periods
 
 
 def filter_time_entries_by_period(time_entries_df: pd.DataFrame, period_start: date, period_end: date) -> pd.DataFrame:
@@ -900,7 +931,7 @@ def build_nn_metrics_html(nn_summary: Optional[Dict[str, Any]], note: Optional[s
     def fmt(val: Optional[float]) -> str:
         if val is None:
             return "n/a"
-        return f"{val:.2f}"
+        return f"{val:.0f}"
 
     ratio_text = f"{ratio * 100:.0f}%" if ratio is not None else "n/a"
     return (
@@ -958,6 +989,145 @@ def build_project_info_tables_html(
     return "<div class='project-cards'>" + "".join(cards) + "</div>"
 
 
+def _escape_html_multiline(value: Any) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    text = str(value)
+    escaped = html.escape(text)
+    escaped = escaped.replace("\r\n", "\n").replace("\r", "\n")
+    return escaped.replace("\n", "<br/>")
+
+
+def _format_minutes_hhmm(total_minutes: Any) -> str:
+    if total_minutes is None or (isinstance(total_minutes, float) and pd.isna(total_minutes)):
+        return "00:00"
+    try:
+        minutes_int = int(round(float(total_minutes)))
+    except (TypeError, ValueError):
+        return "00:00"
+    sign = "-" if minutes_int < 0 else ""
+    minutes_int = abs(minutes_int)
+    hours, minutes = divmod(minutes_int, 60)
+    return f"{sign}{hours:02d}:{minutes:02d}"
+
+
+def build_logged_hours_breakdown_html(
+    time_entries_df_filtered: pd.DataFrame,
+    title: str = "Logged hours (by project)",
+) -> str:
+    if time_entries_df_filtered is None or time_entries_df_filtered.empty:
+        return (
+            "<div class='hours-breakdown'>"
+            f"<div class='hours-breakdown-header'><h3>{html.escape(title)}</h3></div>"
+            "<div class='hours-breakdown-note'>No time log entries in this period.</div>"
+            "</div>"
+        )
+
+    required_cols = {"project_id", "duration_hours"}
+    missing = [c for c in required_cols if c not in time_entries_df_filtered.columns]
+    if missing:
+        return (
+            "<div class='hours-breakdown'>"
+            f"<div class='hours-breakdown-header'><h3>{html.escape(title)}</h3></div>"
+            "<div class='hours-breakdown-note'>"
+            "Time log entries are missing expected columns: "
+            + html.escape(", ".join(missing))
+            + "</div>"
+            "</div>"
+        )
+
+    entries = time_entries_df_filtered.copy()
+    entries["project_id"] = entries["project_id"].astype(str).str.strip()
+
+    if "project_name" not in entries.columns:
+        entries["project_name"] = entries["project_id"]
+    entries["project_name"] = entries["project_name"].fillna("").astype(str).str.strip()
+    entries.loc[entries["project_name"] == "", "project_name"] = entries["project_id"]
+
+    what_i_did_col: Optional[str] = None
+    for candidate in ("WhatIDid*", "WhatIDid"):
+        if candidate in entries.columns:
+            what_i_did_col = candidate
+            break
+
+    entries["duration_hours"] = pd.to_numeric(entries["duration_hours"], errors="coerce")
+    entries = entries.dropna(subset=["duration_hours"]).copy()
+    entries = entries[entries["duration_hours"] > 0].copy()
+    if "duration_minutes" in entries.columns:
+        entries["duration_minutes"] = pd.to_numeric(entries["duration_minutes"], errors="coerce")
+    else:
+        entries["duration_minutes"] = entries["duration_hours"] * 60.0
+    if entries.empty:
+        return (
+            "<div class='hours-breakdown'>"
+            f"<div class='hours-breakdown-header'><h3>{html.escape(title)}</h3></div>"
+            "<div class='hours-breakdown-note'>No logged hours in this period.</div>"
+            "</div>"
+        )
+
+    totals = (
+        entries.groupby(["project_id", "project_name"], as_index=False)["duration_minutes"]
+        .sum(min_count=1)
+        .rename(columns={"duration_minutes": "total_minutes"})
+    )
+    totals["total_minutes"] = pd.to_numeric(totals["total_minutes"], errors="coerce").fillna(0.0)
+    totals = totals.sort_values(["total_minutes", "project_name", "project_id"], ascending=[False, True, True])
+
+    projects_html: List[str] = []
+    for _, row in totals.iterrows():
+        project_id = str(row.get("project_id", "")).strip()
+        project_name = str(row.get("project_name", project_id)).strip() or project_id
+        total_minutes = float(row.get("total_minutes", 0.0) or 0.0)
+
+        project_entries = entries.loc[entries["project_id"] == project_id].copy()
+        project_entries = project_entries.sort_values(["duration_minutes"], ascending=False)
+
+        entry_rows: List[str] = []
+        for _, entry in project_entries.iterrows():
+            dur_text = _format_minutes_hhmm(entry.get("duration_minutes"))
+            desc_val = entry.get(what_i_did_col) if what_i_did_col else ""
+            desc_html = _escape_html_multiline(desc_val).strip()
+            if not desc_html:
+                desc_html = "<span class='hours-entry-empty'>(no details)</span>"
+            entry_rows.append(
+                "<tr>"
+                f"<td class='hours-entry-duration'>{html.escape(dur_text)}</td>"
+                f"<td>{desc_html}</td>"
+                "</tr>"
+            )
+
+        summary_html = (
+            f"<span class='hours-project-total'>{html.escape(_format_minutes_hhmm(total_minutes))}</span>, "
+            f"<span class='hours-project-name'>{html.escape(project_name)}</span>"
+        )
+
+        projects_html.append(
+            "<details class='hours-project'>"
+            f"<summary>{summary_html}</summary>"
+            "<div class='hours-project-entries'>"
+            "<table class='hours-entry-table'>"
+            "<thead><tr><th>Duration</th><th>Details</th></tr></thead>"
+            "<tbody>"
+            + "".join(entry_rows)
+            + "</tbody>"
+            "</table>"
+            "</div>"
+            "</details>"
+        )
+
+    return (
+        "<div class='hours-breakdown'>"
+        "<div class='hours-breakdown-header'>"
+        f"<h3>{html.escape(title)}</h3>"
+        "<div class='hours-breakdown-note'>Click a project to expand.</div>"
+        "</div>"
+        "<div class='hours-breakdown-list'>"
+        + "".join(projects_html)
+        + "</div>"
+        "</div>"
+    )
+
+
 # ----------------------------
 # Plot builders
 # ----------------------------
@@ -979,6 +1149,7 @@ def apply_axis_style(fig: go.Figure, total_rows: int) -> None:
         zeroline=True,
         zerolinewidth=1,
         zerolinecolor="rgba(0,0,0,0.15)",
+        automargin=True,
     )
     for row in range(1, total_rows + 1):
         fig.update_xaxes(**axis_style, row=row, col=1)
@@ -1937,7 +2108,7 @@ def build_counts_figure(
         _, project_color_map = build_color_maps(projects_df)
     if timeline_projects_df is None:
         timeline_projects_df = projects_df
-    fig = make_subplots(rows=total_rows, cols=1, shared_xaxes=False, vertical_spacing=0.08)
+    fig = make_subplots(rows=total_rows, cols=1, shared_xaxes=False, vertical_spacing=0.10)
 
     add_stacked_project_count_bars(fig, projects_df, "programma", 1,
                                    "Projects per programma (stacked: each project = 1 block)",
@@ -1960,7 +2131,7 @@ def build_counts_figure(
     apply_axis_style(fig, total_rows)
     fig.update_layout(
         barmode="stack",
-        height=1400,
+        height=1600,
         margin=dict(l=60, r=60, t=40, b=60),
         plot_bgcolor="rgba(255,255,255,1)",
         paper_bgcolor="rgba(250,250,250,1)",
@@ -1984,7 +2155,8 @@ def build_hours_figure(
     else:
         total_rows = 6
     _, project_color_map = build_color_maps(projects_df)
-    fig = make_subplots(rows=total_rows, cols=1, shared_xaxes=False, vertical_spacing=0.08)
+    vertical_spacing = 0.10 if report_type in ("weekly", "biweekly") else 0.09
+    fig = make_subplots(rows=total_rows, cols=1, shared_xaxes=False, vertical_spacing=vertical_spacing)
 
     display_start = period_start
     display_end = period_end
@@ -2037,7 +2209,7 @@ def build_hours_figure(
     apply_axis_style(fig, total_rows)
     fig.update_layout(
         barmode="stack",
-        height=1400 if report_type in ("weekly", "biweekly") else 2050,
+        height=1600 if report_type in ("weekly", "biweekly") else 2300,
         margin=dict(l=60, r=60, t=40, b=60),
         plot_bgcolor="rgba(255,255,255,1)",
         paper_bgcolor="rgba(250,250,250,1)",
@@ -2182,6 +2354,96 @@ def write_tabbed_html(
     .hours-metrics {{
       margin: 6px 0 16px;
     }}
+    .hours-breakdown {{
+      background: #FFF;
+      border: 1px solid #DDD;
+      border-radius: 10px;
+      padding: 12px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }}
+    .hours-breakdown-header {{
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+    }}
+    .hours-breakdown h3 {{
+      margin: 0;
+      font-size: 16px;
+    }}
+    .hours-breakdown-note {{
+      font-size: 12px;
+      color: #444;
+    }}
+    .hours-breakdown-list {{
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }}
+    .hours-project {{
+      background: #FFF;
+      border: 1px solid #EEE;
+      border-radius: 8px;
+      padding: 6px 10px;
+    }}
+    .hours-project[open] {{
+      border-color: #CCC;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }}
+    .hours-project summary {{
+      cursor: pointer;
+      font-weight: 600;
+      list-style: none;
+      outline: none;
+    }}
+    .hours-project summary::-webkit-details-marker {{
+      display: none;
+    }}
+    .hours-project summary::before {{
+      content: "▸";
+      display: inline-block;
+      width: 1em;
+      color: #01378A;
+    }}
+    .hours-project[open] summary::before {{
+      content: "▾";
+    }}
+    .hours-project-total {{
+      font-variant-numeric: tabular-nums;
+    }}
+    .hours-project-entries {{
+      margin-top: 8px;
+      padding-left: 1.2em;
+    }}
+    .hours-entry-table {{
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }}
+    .hours-entry-table th {{
+      text-align: left;
+      padding: 6px 6px;
+      color: #555;
+      border-bottom: 1px solid #EEE;
+    }}
+    .hours-entry-table td {{
+      padding: 6px 6px;
+      border-bottom: 1px solid #F3F3F3;
+      vertical-align: top;
+      word-break: break-word;
+    }}
+    .hours-entry-duration {{
+      width: 110px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }}
+    .hours-entry-empty {{
+      color: #777;
+      font-style: italic;
+    }}
     .nn-metrics {{
       display: flex;
       flex-wrap: wrap;
@@ -2312,34 +2574,87 @@ def write_multi_period_tabbed_html(
     profile_img_html = f"<img class='profile-img' src='{profile_uri}' alt='Profile'/>" if profile_uri else ""
     teamnl_img_html = f"<img class='teamnl-img' src='{teamnl_uri}' alt='TeamNL'/>" if teamnl_uri else ""
 
-    period_order = [p for p in ("weekly", "biweekly", "monthly", "yearly") if p in period_payloads]
-    if not period_order:
-        raise ValueError("No period payloads provided.")
-    default_period = period_order[0]
+    month_period_ids = sorted(
+        [p for p in period_payloads.keys() if str(p).startswith("monthly-")],
+        key=lambda p: str(p)[len("monthly-"):],
+        reverse=True,
+    )
 
-    period_buttons_html_parts: List[str] = []
+    period_groups: List[str] = []
+    if "weekly" in period_payloads:
+        period_groups.append("weekly")
+    if "biweekly" in period_payloads:
+        period_groups.append("biweekly")
+    if month_period_ids:
+        period_groups.append("monthly")
+    if "yearly" in period_payloads:
+        period_groups.append("yearly")
+    if not period_groups:
+        raise ValueError("No period payloads provided.")
+
+    default_group = period_groups[0]
+    default_month_id = month_period_ids[0] if month_period_ids else ""
+    default_period_id = default_month_id if default_group == "monthly" else default_group
+
+    period_group_buttons_html_parts: List[str] = []
+    month_buttons_html_parts: List[str] = []
     period_meta_html_parts: List[str] = []
     period_note_html_parts: List[str] = []
     period_nn_pie_block_parts: List[str] = []
     period_counts_panels_parts: List[str] = []
     period_hours_panels_parts: List[str] = []
 
-    for period_key in period_order:
-        payload = period_payloads[period_key]
-        label = html.escape(str(payload.get("label", period_key)))
-        period_range = html.escape(str(payload.get("period_range", "")))
-        is_default = period_key == default_period
+    group_labels: Dict[str, str] = {}
+    if "weekly" in period_payloads:
+        group_labels["weekly"] = html.escape(str(period_payloads["weekly"].get("label", "1-week")))
+    if "biweekly" in period_payloads:
+        group_labels["biweekly"] = html.escape(str(period_payloads["biweekly"].get("label", "2-weeks")))
+    if month_period_ids:
+        group_labels["monthly"] = "Month"
+    if "yearly" in period_payloads:
+        group_labels["yearly"] = html.escape(str(period_payloads["yearly"].get("label", "Year")))
 
-        period_buttons_html_parts.append(
+    for group_key in ("weekly", "biweekly", "monthly", "yearly"):
+        if group_key not in period_groups:
+            continue
+        label = group_labels.get(group_key, html.escape(group_key))
+        is_default = group_key == default_group
+        period_group_buttons_html_parts.append(
             (
                 f"<button class=\"tab-btn period-btn{' active' if is_default else ''}\" "
-                f"id=\"btn-period-{period_key}\" onclick=\"showPeriod('{period_key}')\">{label}</button>"
+                f"id=\"btn-period-{group_key}\" onclick=\"showPeriodGroup('{group_key}')\">{label}</button>"
             )
         )
+
+    for month_id in month_period_ids:
+        payload = period_payloads[month_id]
+        label = html.escape(str(payload.get("label", month_id)))
+        is_default = month_id == default_month_id
+        month_buttons_html_parts.append(
+            (
+                f"<button class=\"tab-btn month-btn{' active' if is_default else ''}\" "
+                f"id=\"btn-month-{month_id}\" onclick=\"showMonth('{month_id}')\">{label}</button>"
+            )
+        )
+
+    period_ids: List[str] = []
+    for key in ("weekly", "biweekly"):
+        if key in period_payloads:
+            period_ids.append(key)
+    period_ids.extend(month_period_ids)
+    if "yearly" in period_payloads:
+        period_ids.append("yearly")
+
+    for period_id in period_ids:
+        payload = period_payloads[period_id]
+        label = html.escape(str(payload.get("label", period_id)))
+        period_range = html.escape(str(payload.get("period_range", "")))
+        is_default = period_id == default_period_id
+
         period_meta_html_parts.append(
             (
                 f"<span class=\"period-meta{' active' if is_default else ''}\" "
-                f"id=\"meta-{period_key}\"><b>{label}</b> — {period_range}</span>"
+                f"id=\"meta-{period_id}\"><b>{label}</b> — {period_range}</span>"
             )
         )
 
@@ -2347,7 +2662,7 @@ def write_multi_period_tabbed_html(
         period_note_html_parts.append(
             (
                 f"<div class=\"nn-note period-note{' active' if is_default else ''}\" "
-                f"id=\"nn-note-{period_key}\">{html.escape(str(nn_note))}</div>"
+                f"id=\"nn-note-{period_id}\">{html.escape(str(nn_note))}</div>"
             )
         )
 
@@ -2356,7 +2671,7 @@ def write_multi_period_tabbed_html(
             period_nn_pie_block_parts.append(
                 (
                     f"<div class=\"nn-pie-block period-nn{' active' if is_default else ''}\" "
-                    f"id=\"nn-pie-block-{period_key}\">"
+                    f"id=\"nn-pie-block-{period_id}\">"
                     "<div class='nn-pie-title'>Billed (to date)<br>vs remaining</div>"
                     f"{nn_pie_html}"
                     "</div>"
@@ -2365,8 +2680,8 @@ def write_multi_period_tabbed_html(
 
         counts_fig = payload["counts_fig"]
         hours_fig = payload["hours_fig"]
-        counts_div_id = f"counts-fig-{period_key}"
-        hours_div_id = f"hours-fig-{period_key}"
+        counts_div_id = f"counts-fig-{period_id}"
+        hours_div_id = f"hours-fig-{period_id}"
         counts_html = pio.to_html(counts_fig, include_plotlyjs=False, full_html=False, div_id=counts_div_id)
         hours_html = pio.to_html(hours_fig, include_plotlyjs=False, full_html=False, div_id=hours_div_id)
         hours_metrics_html = payload.get("hours_metrics_html") or ""
@@ -2374,20 +2689,21 @@ def write_multi_period_tabbed_html(
         period_counts_panels_parts.append(
             (
                 f"<div class=\"period-panel{' active' if is_default else ''}\" "
-                f"id=\"period-counts-{period_key}\">{counts_html}</div>"
+                f"id=\"period-counts-{period_id}\">{counts_html}</div>"
             )
         )
         period_hours_panels_parts.append(
             (
                 f"<div class=\"period-panel{' active' if is_default else ''}\" "
-                f"id=\"period-hours-{period_key}\">"
+                f"id=\"period-hours-{period_id}\">"
                 f"<div class=\"hours-metrics\">{hours_metrics_html}</div>"
                 f"{hours_html}"
                 "</div>"
             )
         )
 
-    period_buttons_html = "\n".join(period_buttons_html_parts)
+    period_group_buttons_html = "\n".join(period_group_buttons_html_parts)
+    month_buttons_html = "\n".join(month_buttons_html_parts)
     period_meta_html = "\n".join(period_meta_html_parts)
     period_note_html = "\n".join(period_note_html_parts)
     nn_pie_blocks_html = "\n".join(period_nn_pie_block_parts)
@@ -2471,6 +2787,12 @@ def write_multi_period_tabbed_html(
       padding-bottom: 12px;
       flex-wrap: wrap;
     }}
+    .month-tabs {{
+      display: none;
+    }}
+    .month-tabs.active {{
+      display: flex;
+    }}
     .tab-btn {{
       padding: 8px 16px;
       border: 1px solid #CCC;
@@ -2478,6 +2800,10 @@ def write_multi_period_tabbed_html(
       background: #FFF;
       cursor: pointer;
       font-weight: 600;
+    }}
+    .tab-btn.month-btn {{
+      padding: 6px 12px;
+      font-size: 13px;
     }}
     .tab-btn.active {{
       background: #01378A;
@@ -2523,6 +2849,96 @@ def write_multi_period_tabbed_html(
     .hours-metrics:empty {{
       display: none;
       margin: 0;
+    }}
+    .hours-breakdown {{
+      background: #FFF;
+      border: 1px solid #DDD;
+      border-radius: 10px;
+      padding: 12px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }}
+    .hours-breakdown-header {{
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+    }}
+    .hours-breakdown h3 {{
+      margin: 0;
+      font-size: 16px;
+    }}
+    .hours-breakdown-note {{
+      font-size: 12px;
+      color: #444;
+    }}
+    .hours-breakdown-list {{
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }}
+    .hours-project {{
+      background: #FFF;
+      border: 1px solid #EEE;
+      border-radius: 8px;
+      padding: 6px 10px;
+    }}
+    .hours-project[open] {{
+      border-color: #CCC;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }}
+    .hours-project summary {{
+      cursor: pointer;
+      font-weight: 600;
+      list-style: none;
+      outline: none;
+    }}
+    .hours-project summary::-webkit-details-marker {{
+      display: none;
+    }}
+    .hours-project summary::before {{
+      content: "▸";
+      display: inline-block;
+      width: 1em;
+      color: #01378A;
+    }}
+    .hours-project[open] summary::before {{
+      content: "▾";
+    }}
+    .hours-project-total {{
+      font-variant-numeric: tabular-nums;
+    }}
+    .hours-project-entries {{
+      margin-top: 8px;
+      padding-left: 1.2em;
+    }}
+    .hours-entry-table {{
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }}
+    .hours-entry-table th {{
+      text-align: left;
+      padding: 6px 6px;
+      color: #555;
+      border-bottom: 1px solid #EEE;
+    }}
+    .hours-entry-table td {{
+      padding: 6px 6px;
+      border-bottom: 1px solid #F3F3F3;
+      vertical-align: top;
+      word-break: break-word;
+    }}
+    .hours-entry-duration {{
+      width: 110px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }}
+    .hours-entry-empty {{
+      color: #777;
+      font-style: italic;
     }}
     .nn-metrics {{
       display: flex;
@@ -2601,7 +3017,10 @@ def write_multi_period_tabbed_html(
       </div>
 
       <div class="tabs">
-        {period_buttons_html}
+        {period_group_buttons_html}
+      </div>
+      <div class="tabs month-tabs{' active' if default_group == 'monthly' else ''}" id="month-tabs">
+        {month_buttons_html}
       </div>
     </div>
 
@@ -2620,15 +3039,28 @@ def write_multi_period_tabbed_html(
 
   <script>
     var currentTab = "counts";
-    var currentPeriod = "{default_period}";
+    var currentPeriodId = "{default_period_id}";
+    var currentMonthlyId = "{default_month_id}";
 
     function showTab(name) {{
       currentTab = name;
       updateView();
     }}
 
-    function showPeriod(period) {{
-      currentPeriod = period;
+    function showPeriodGroup(group) {{
+      if (group === "monthly") {{
+        if (currentMonthlyId) {{
+          currentPeriodId = currentMonthlyId;
+        }}
+      }} else {{
+        currentPeriodId = group;
+      }}
+      updateView();
+    }}
+
+    function showMonth(monthId) {{
+      currentMonthlyId = monthId;
+      currentPeriodId = monthId;
       updateView();
     }}
 
@@ -2638,19 +3070,34 @@ def write_multi_period_tabbed_html(
       document.getElementById("btn-counts").classList.toggle("active", currentTab === "counts");
       document.getElementById("btn-hours").classList.toggle("active", currentTab === "hours");
 
+      var isMonthly = currentPeriodId && currentPeriodId.startsWith("monthly-");
+      var activeGroup = isMonthly ? "monthly" : currentPeriodId;
+
       document.querySelectorAll(".period-btn").forEach(function(btn) {{
         btn.classList.remove("active");
       }});
-      var activeBtn = document.getElementById("btn-period-" + currentPeriod);
+      var activeBtn = document.getElementById("btn-period-" + activeGroup);
       if (activeBtn) {{
         activeBtn.classList.add("active");
+      }}
+
+      var monthTabs = document.getElementById("month-tabs");
+      if (monthTabs) {{
+        monthTabs.classList.toggle("active", isMonthly);
+      }}
+      document.querySelectorAll(".month-btn").forEach(function(btn) {{
+        btn.classList.remove("active");
+      }});
+      var activeMonthBtn = document.getElementById("btn-month-" + currentMonthlyId);
+      if (activeMonthBtn) {{
+        activeMonthBtn.classList.add("active");
       }}
 
       document.querySelectorAll(".period-panel").forEach(function(panel) {{
         panel.classList.remove("active");
       }});
-      var countsPanel = document.getElementById("period-counts-" + currentPeriod);
-      var hoursPanel = document.getElementById("period-hours-" + currentPeriod);
+      var countsPanel = document.getElementById("period-counts-" + currentPeriodId);
+      var hoursPanel = document.getElementById("period-hours-" + currentPeriodId);
       if (countsPanel) {{
         countsPanel.classList.add("active");
       }}
@@ -2661,7 +3108,7 @@ def write_multi_period_tabbed_html(
       document.querySelectorAll(".period-meta").forEach(function(el) {{
         el.classList.remove("active");
       }});
-      var metaEl = document.getElementById("meta-" + currentPeriod);
+      var metaEl = document.getElementById("meta-" + currentPeriodId);
       if (metaEl) {{
         metaEl.classList.add("active");
       }}
@@ -2669,7 +3116,7 @@ def write_multi_period_tabbed_html(
       document.querySelectorAll(".period-note").forEach(function(el) {{
         el.classList.remove("active");
       }});
-      var noteEl = document.getElementById("nn-note-" + currentPeriod);
+      var noteEl = document.getElementById("nn-note-" + currentPeriodId);
       if (noteEl) {{
         noteEl.classList.add("active");
       }}
@@ -2677,18 +3124,18 @@ def write_multi_period_tabbed_html(
       document.querySelectorAll(".period-nn").forEach(function(el) {{
         el.classList.remove("active");
       }});
-      var pieEl = document.getElementById("nn-pie-block-" + currentPeriod);
+      var pieEl = document.getElementById("nn-pie-block-" + currentPeriodId);
       if (pieEl) {{
         pieEl.classList.add("active");
       }}
 
-      var figId = currentTab + "-fig-" + currentPeriod;
+      var figId = currentTab + "-fig-" + currentPeriodId;
       var figEl = document.getElementById(figId);
       if (figEl && window.Plotly) {{
         Plotly.Plots.resize(figEl);
       }}
 
-      var pieFigEl = document.getElementById("nn-pie-" + currentPeriod);
+      var pieFigEl = document.getElementById("nn-pie-" + currentPeriodId);
       if (pieFigEl && window.Plotly) {{
         Plotly.Plots.resize(pieFigEl);
       }}
@@ -2824,7 +3271,7 @@ def generate_reports(report_type: str, asof_date: date) -> None:
 
     if report_type in ("combined", "all"):
         period_payloads: Dict[str, Dict[str, Any]] = {}
-        for rtype in ("weekly", "biweekly", "monthly", "yearly"):
+        for rtype in ("weekly", "biweekly", "yearly"):
             period_info = periods[rtype]
             period_start = period_info["start"]
             period_end = period_info["end"]
@@ -2836,18 +3283,20 @@ def generate_reports(report_type: str, asof_date: date) -> None:
             nn_note = None
             nn_pie_html = ""
             hours_metrics_html = ""
-            if rtype in ("monthly", "yearly"):
+            if rtype == "yearly":
                 if nn_df is None:
                     nn_note = nn_status
                 else:
-                    nn_summary, nn_note = compute_nn_summary(nn_df, "monthly" if rtype == "monthly" else "yearly", period_end, time_entries_filtered)
+                    nn_summary, nn_note = compute_nn_summary(nn_df, "yearly", period_end, time_entries_filtered)
                     if nn_note:
                         nn_note = f"NN_maandelijks: {nn_note}"
                 nn_pie_html = build_nn_pie_html(nn_summary, div_id=f"nn-pie-{rtype}")
                 hours_metrics_html = build_nn_metrics_html(nn_summary, nn_note)
+            else:
+                hours_metrics_html = build_logged_hours_breakdown_html(time_entries_filtered)
 
             projects_for_counts = projects_df
-            if rtype in ("weekly", "biweekly", "monthly"):
+            if rtype in ("weekly", "biweekly"):
                 projects_for_counts = filter_projects_with_hours(projects_df, time_entries_filtered)
 
             counts_fig = build_counts_figure(
@@ -2871,6 +3320,59 @@ def generate_reports(report_type: str, asof_date: date) -> None:
             )
 
             period_payloads[rtype] = dict(
+                label=period_label,
+                period_range=f"{period_start.isoformat()} to {period_end.isoformat()}",
+                counts_fig=counts_fig,
+                hours_fig=hours_fig,
+                hours_metrics_html=hours_metrics_html,
+                nn_pie_html=nn_pie_html,
+                nn_note=nn_note,
+            )
+
+        for month_info in list_completed_month_periods(asof_date, time_entries_df):
+            period_start = month_info["start"]
+            period_end = month_info["end"]
+            month_key = month_info["key"]
+            period_id = f"monthly-{month_key}"
+            period_label = month_info["label"]
+
+            time_entries_filtered = filter_time_entries_by_period(time_entries_df, period_start, period_end)
+
+            nn_summary = None
+            nn_note = None
+            nn_pie_html = ""
+            hours_metrics_html = ""
+            if nn_df is None:
+                nn_note = nn_status
+            else:
+                nn_summary, nn_note = compute_nn_summary(nn_df, "monthly", period_end, time_entries_filtered)
+                if nn_note:
+                    nn_note = f"NN_maandelijks: {nn_note}"
+            nn_pie_html = build_nn_pie_html(nn_summary, div_id=f"nn-pie-{period_id}")
+            hours_metrics_html = build_nn_metrics_html(nn_summary, nn_note)
+
+            projects_for_counts = filter_projects_with_hours(projects_df, time_entries_filtered)
+            counts_fig = build_counts_figure(
+                projects_for_counts,
+                export_date,
+                period_start,
+                period_end,
+                period_label,
+                project_color_map=project_color_map,
+                timeline_projects_df=projects_df,
+                timeline_year=timeline_year,
+            )
+            hours_fig = build_hours_figure(
+                projects_df,
+                time_entries_filtered,
+                export_date,
+                period_start,
+                period_end,
+                period_label,
+                report_type="monthly",
+            )
+
+            period_payloads[period_id] = dict(
                 label=period_label,
                 period_range=f"{period_start.isoformat()} to {period_end.isoformat()}",
                 counts_fig=counts_fig,
@@ -2926,6 +3428,8 @@ def generate_reports(report_type: str, asof_date: date) -> None:
                 nn_note = f"NN_maandelijks: {nn_note}"
         nn_pie_html = build_nn_pie_html(nn_summary)
         hours_metrics_html = build_nn_metrics_html(nn_summary, nn_note)
+    if rtype in ("weekly", "biweekly"):
+        hours_metrics_html = build_logged_hours_breakdown_html(time_entries_filtered)
 
     projects_for_counts = projects_df
     if rtype in ("weekly", "biweekly", "monthly"):

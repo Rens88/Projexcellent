@@ -8,26 +8,34 @@ MWAH - Tot nu toe gefactueerde uren uitdrukken als percentage beschikbare uren
 MWAH - Expliciet melden wanneer uren opzet obv "nog niet ingepland" als Sport Science Centre uren
 
 Over tijd plot:
-- Alleen actieve projecten volle kleur
-- Combine weekly, monthly yearly into one file with a button to switch tabs (2 dims of buttons: weekly, monthly, yearl and counts / hours
+- Alleen actieve projecten volle kleur (al gedaan?)
 
+- Iets doen met "hours_cap": Projectoverzicht tabellen ordenen op percentage hours_cap? Kleur geven als 80% (oranje) en 100% (rood) is overschreden?
+- Add a "Closed Projects" tab that summarizes the closed projects, including a visual of what was delivered (which I need to come up with a workflo for. Perhaps add a folder "deliverables" to each project folder? Or products. Perhaps braintstorm a bit about this..
 -- 
 Ideetjes om rapportage te verbeteren:
 -> prioritering printen zodat ik weet waar ik aan moet werken?
 
-- In the weekly report, add a tabular display of the logged hours for that week aggregated by project sorted by the project on which I spent the most hours. Show each of the entries for that project:
-	project 1 12 hours total
-	- entry 1: 3 hours, worked on this and this (just take the info from time_log.xlsx)
-	- entry 2: 2 hours, worked on that and that
-	
-- Additionally to a weekly report, maak a two-weekly report following exactly the same logic as the weekly report.
-	
+
+
+
 **IN PROGRESS**
+
+	
+
+**DONE**
+- Reorganize buttoning. 
+-> If Month is selected, fold-out an extra row of buttons showing all completed months, by default selecting the most recently finished month, but allowing the user to also select months further in the past.
+-> Rename the button "Year" to "Year (to-date)"
+
+- Add some more rspacing between plots to make sure labels don't overlap
+- Tabular showing hours with no decimals (unnecessary precision)
+- In the weekly and biweekly report, add a tabular display of the logged hours for that week aggregated by project sorted by the project on which I spent the most hours. Add a unfold/fold functionality to expand each project to see which specific entries were made. this should show "WhatIDid" and "duration_hours" and should also be sorted by duration_hours.
+
+
+**COMMITTED**
 - Generate one file
 - Add biweekly report.
 
-**DONE**
-
-**COMMITTED**
 - Pie chart
 - Timeseries fix

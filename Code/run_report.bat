@@ -40,9 +40,7 @@ echo.
 echo =====================================
 echo FINISHED SUCCESSFULLY
 echo Check the Reports folder for:
-echo   project_report_yearly.html
-echo   project_report_monthly_YYYY-MM.html
-echo   project_report_weekly_YYYY-Www.html
+echo   project_report.html
 echo =====================================
 goto :end
 
