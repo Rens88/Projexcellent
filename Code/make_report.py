@@ -16,15 +16,13 @@ What this script does
 5) Reads time spent from time_log.xlsx (sheet: TimeLog, rows under the header),
    aggregates hours per project and per programma/requester.
 6) Creates a single HTML report (Plotly) with:
-   - Projects per programma (stacked: each project is one block; supports multiple programma values)
-   - Projects per theme (stacked: each project is one block)
-   - Projects per requester (stacked: each project is one block)
-   - Hours per programma (stacked: each project contributes its hours; supports multiple programma values)
-   - Active projects per week (stacked by project)
+   - Tabs: Counts / Hours
+   - Period switcher: 1-week / 2-weeks / month / year
+   - (Optionally) single-period reports via `--report-type`
 7) Exports:
-   - YYYY-MM-DD_project_report.html
-   - YYYY-MM-DD_project_report.png
-     (PNG requires `pip install kaleido`)
+   - Reports/project_report.html (combined; default)
+   - Reports/Archive/*_generated_YYYY-MM-DD.html
+   - Single-period exports also write a PNG (requires `pip install kaleido`)
 
 Dependencies
 ------------
@@ -581,16 +579,29 @@ def _last_completed_iso_week(asof_date: date) -> Tuple[date, date, str]:
     return period_start, period_end, period_key
 
 
+def _last_completed_biweekly(asof_date: date) -> Tuple[date, date, str]:
+    # Two full ISO weeks (Mon-Sun), ending on the last completed Sunday.
+    last_sunday = asof_date - timedelta(days=asof_date.weekday() + 1)
+    period_end = last_sunday
+    period_start = period_end - timedelta(days=13)
+    iso_start = period_start.isocalendar()
+    iso_end = period_end.isocalendar()
+    period_key = f"{iso_start.year}-W{iso_start.week:02d}_to_{iso_end.year}-W{iso_end.week:02d}"
+    return period_start, period_end, period_key
+
+
 def compute_report_periods(asof_date: date) -> Dict[str, Dict[str, Any]]:
     monthly_start, monthly_end, month_key = _last_completed_month(asof_date)
     weekly_start, weekly_end, week_key = _last_completed_iso_week(asof_date)
-    yearly_start = date(monthly_end.year, 1, 1)
-    yearly_end = monthly_end
-    year_key = f"{yearly_end.year:04d}"
+    biweekly_start, biweekly_end, biweek_key = _last_completed_biweekly(asof_date)
+    yearly_start = date(asof_date.year, 1, 1)
+    yearly_end = asof_date
+    year_key = f"{asof_date.year:04d}"
     return {
-        "weekly": dict(label="Weekly report", start=weekly_start, end=weekly_end, key=week_key),
-        "monthly": dict(label="Monthly report", start=monthly_start, end=monthly_end, key=month_key),
-        "yearly": dict(label="Yearly report", start=yearly_start, end=yearly_end, key=year_key),
+        "weekly": dict(label="1-week", start=weekly_start, end=weekly_end, key=week_key),
+        "biweekly": dict(label="2-weeks", start=biweekly_start, end=biweekly_end, key=biweek_key),
+        "monthly": dict(label="Month", start=monthly_start, end=monthly_end, key=month_key),
+        "yearly": dict(label="Year", start=yearly_start, end=yearly_end, key=year_key),
     }
 
 
@@ -826,7 +837,7 @@ def compute_nn_summary(
     return summary, None
 
 
-def build_nn_pie_html(nn_summary: Optional[Dict[str, Any]]) -> str:
+def build_nn_pie_html(nn_summary: Optional[Dict[str, Any]], div_id: str = "nn-pie") -> str:
     if not nn_summary:
         return ""
     billed = nn_summary.get("billed")
@@ -871,7 +882,7 @@ def build_nn_pie_html(nn_summary: Optional[Dict[str, Any]]) -> str:
             ),
         ],
     )
-    return pio.to_html(fig, include_plotlyjs=False, full_html=False, div_id="nn-pie")
+    return pio.to_html(fig, include_plotlyjs=False, full_html=False, div_id=div_id)
 
 
 def build_nn_metrics_html(nn_summary: Optional[Dict[str, Any]], note: Optional[str]) -> str:
@@ -1968,7 +1979,7 @@ def build_hours_figure(
     period_label: str,
     report_type: str,
 ) -> go.Figure:
-    if report_type == "weekly":
+    if report_type in ("weekly", "biweekly"):
         total_rows = 4
     else:
         total_rows = 6
@@ -1989,7 +2000,7 @@ def build_hours_figure(
     add_stacked_hours_bars(fig, projects_df, time_entries_df_filtered, "requester", 3,
                            "Hours per requester (stacked: each project contributes its hours)",
                            project_color_map)
-    if report_type == "weekly":
+    if report_type in ("weekly", "biweekly"):
         add_reported_hours_per_project(fig, projects_df, time_entries_df_filtered, 4,
                                        "Reported hours per project", project_color_map)
     else:
@@ -2026,7 +2037,7 @@ def build_hours_figure(
     apply_axis_style(fig, total_rows)
     fig.update_layout(
         barmode="stack",
-        height=1400 if report_type == "weekly" else 2050,
+        height=1400 if report_type in ("weekly", "biweekly") else 2050,
         margin=dict(l=60, r=60, t=40, b=60),
         plot_bgcolor="rgba(255,255,255,1)",
         paper_bgcolor="rgba(250,250,250,1)",
@@ -2285,6 +2296,416 @@ def write_tabbed_html(
         f.write(html_content)
 
 
+def write_multi_period_tabbed_html(
+    period_payloads: Dict[str, Dict[str, Any]],
+    out_html_path: str,
+    header_context: Dict[str, Any],
+    tables_html: str,
+) -> None:
+    plotly_cdn = _plotly_cdn_src()
+    title_text = html.escape(str(header_context.get("title_text", "Project Portfolio Overview")))
+    export_date = html.escape(str(header_context.get("export_date", "")))
+
+    profile_uri = header_context.get("profile_data_uri")
+    teamnl_uri = header_context.get("teamnl_data_uri")
+
+    profile_img_html = f"<img class='profile-img' src='{profile_uri}' alt='Profile'/>" if profile_uri else ""
+    teamnl_img_html = f"<img class='teamnl-img' src='{teamnl_uri}' alt='TeamNL'/>" if teamnl_uri else ""
+
+    period_order = [p for p in ("weekly", "biweekly", "monthly", "yearly") if p in period_payloads]
+    if not period_order:
+        raise ValueError("No period payloads provided.")
+    default_period = period_order[0]
+
+    period_buttons_html_parts: List[str] = []
+    period_meta_html_parts: List[str] = []
+    period_note_html_parts: List[str] = []
+    period_nn_pie_block_parts: List[str] = []
+    period_counts_panels_parts: List[str] = []
+    period_hours_panels_parts: List[str] = []
+
+    for period_key in period_order:
+        payload = period_payloads[period_key]
+        label = html.escape(str(payload.get("label", period_key)))
+        period_range = html.escape(str(payload.get("period_range", "")))
+        is_default = period_key == default_period
+
+        period_buttons_html_parts.append(
+            (
+                f"<button class=\"tab-btn period-btn{' active' if is_default else ''}\" "
+                f"id=\"btn-period-{period_key}\" onclick=\"showPeriod('{period_key}')\">{label}</button>"
+            )
+        )
+        period_meta_html_parts.append(
+            (
+                f"<span class=\"period-meta{' active' if is_default else ''}\" "
+                f"id=\"meta-{period_key}\"><b>{label}</b> — {period_range}</span>"
+            )
+        )
+
+        nn_note = payload.get("nn_note") or ""
+        period_note_html_parts.append(
+            (
+                f"<div class=\"nn-note period-note{' active' if is_default else ''}\" "
+                f"id=\"nn-note-{period_key}\">{html.escape(str(nn_note))}</div>"
+            )
+        )
+
+        nn_pie_html = payload.get("nn_pie_html") or ""
+        if nn_pie_html:
+            period_nn_pie_block_parts.append(
+                (
+                    f"<div class=\"nn-pie-block period-nn{' active' if is_default else ''}\" "
+                    f"id=\"nn-pie-block-{period_key}\">"
+                    "<div class='nn-pie-title'>Billed (to date)<br>vs remaining</div>"
+                    f"{nn_pie_html}"
+                    "</div>"
+                )
+            )
+
+        counts_fig = payload["counts_fig"]
+        hours_fig = payload["hours_fig"]
+        counts_div_id = f"counts-fig-{period_key}"
+        hours_div_id = f"hours-fig-{period_key}"
+        counts_html = pio.to_html(counts_fig, include_plotlyjs=False, full_html=False, div_id=counts_div_id)
+        hours_html = pio.to_html(hours_fig, include_plotlyjs=False, full_html=False, div_id=hours_div_id)
+        hours_metrics_html = payload.get("hours_metrics_html") or ""
+
+        period_counts_panels_parts.append(
+            (
+                f"<div class=\"period-panel{' active' if is_default else ''}\" "
+                f"id=\"period-counts-{period_key}\">{counts_html}</div>"
+            )
+        )
+        period_hours_panels_parts.append(
+            (
+                f"<div class=\"period-panel{' active' if is_default else ''}\" "
+                f"id=\"period-hours-{period_key}\">"
+                f"<div class=\"hours-metrics\">{hours_metrics_html}</div>"
+                f"{hours_html}"
+                "</div>"
+            )
+        )
+
+    period_buttons_html = "\n".join(period_buttons_html_parts)
+    period_meta_html = "\n".join(period_meta_html_parts)
+    period_note_html = "\n".join(period_note_html_parts)
+    nn_pie_blocks_html = "\n".join(period_nn_pie_block_parts)
+    counts_panels_html = "\n".join(period_counts_panels_parts)
+    hours_panels_html = "\n".join(period_hours_panels_parts)
+
+    html_content = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>{title_text}</title>
+  <script src="{plotly_cdn}"></script>
+  <style>
+    body {{
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      margin: 0;
+      background: #FAFAFA;
+      color: #111;
+    }}
+    .page {{
+      padding: 24px 28px 40px;
+    }}
+    .sticky-header {{
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      background: #FAFAFA;
+      padding-top: 8px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+    }}
+    .report-header {{
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      align-items: flex-start;
+      flex-wrap: wrap;
+      padding: 16px 0 8px;
+    }}
+    .header-left h1 {{
+      margin: 0 0 6px 0;
+      font-size: 26px;
+    }}
+    .header-left .meta {{
+      font-size: 14px;
+      color: #444;
+    }}
+    .header-right {{
+      display: flex;
+      gap: 16px;
+      align-items: center;
+    }}
+    .nn-pie-block {{
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }}
+    .nn-pie-title {{
+      writing-mode: vertical-rl;
+      transform: rotate(180deg);
+      font-size: 12px;
+      color: #111;
+      white-space: nowrap;
+    }}
+    .profile-img {{
+      width: 120px;
+      height: 120px;
+      object-fit: cover;
+      border-radius: 10px;
+      border: 2px solid #EEE;
+      background: #FFF;
+    }}
+    .teamnl-img {{
+      height: 64px;
+      object-fit: contain;
+    }}
+    .tabs {{
+      display: flex;
+      gap: 8px;
+      margin: 4px 0 12px;
+      padding-bottom: 12px;
+      flex-wrap: wrap;
+    }}
+    .tab-btn {{
+      padding: 8px 16px;
+      border: 1px solid #CCC;
+      border-radius: 6px;
+      background: #FFF;
+      cursor: pointer;
+      font-weight: 600;
+    }}
+    .tab-btn.active {{
+      background: #01378A;
+      border-color: #01378A;
+      color: #FFF;
+    }}
+    .tab-panel {{
+      display: none;
+    }}
+    .tab-panel.active {{
+      display: block;
+    }}
+    .period-panel {{
+      display: none;
+    }}
+    .period-panel.active {{
+      display: block;
+    }}
+    .period-meta {{
+      display: none;
+    }}
+    .period-meta.active {{
+      display: inline;
+    }}
+    .period-note {{
+      display: none;
+    }}
+    .period-note.active {{
+      display: block;
+    }}
+    .period-note.active:empty {{
+      display: none;
+    }}
+    .period-nn {{
+      display: none;
+    }}
+    .period-nn.active {{
+      display: flex;
+    }}
+    .hours-metrics {{
+      margin: 6px 0 16px;
+    }}
+    .hours-metrics:empty {{
+      display: none;
+      margin: 0;
+    }}
+    .nn-metrics {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px 18px;
+      font-size: 14px;
+      background: #FFF;
+      border: 1px solid #DDD;
+      border-radius: 8px;
+      padding: 10px 12px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }}
+    .nn-note {{
+      margin-top: 6px;
+      font-size: 13px;
+      color: #8A3B3B;
+    }}
+    .project-info-section {{
+      margin-top: 28px;
+    }}
+    .project-cards {{
+      display: flex;
+      gap: 16px;
+      overflow-x: auto;
+      padding-bottom: 8px;
+    }}
+    .project-card {{
+      min-width: 280px;
+      background: #FFF;
+      border: 1px solid #DDD;
+      border-radius: 10px;
+      padding: 12px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }}
+    .project-card-header {{
+      font-weight: 700;
+      margin-bottom: 8px;
+    }}
+    .project-card table {{
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }}
+    .project-card td {{
+      padding: 3px 4px;
+      border-bottom: 1px solid #EEE;
+      vertical-align: top;
+      word-break: break-word;
+    }}
+    .project-card td:first-child {{
+      width: 45%;
+      color: #555;
+    }}
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="sticky-header">
+      <div class="report-header">
+        <div class="header-left">
+          <h1>{title_text}</h1>
+          <div class="meta">{period_meta_html}</div>
+          <div class="meta">Generated: {export_date}</div>
+          {period_note_html}
+        </div>
+        <div class="header-right">
+          {nn_pie_blocks_html}
+          {teamnl_img_html}
+          {profile_img_html}
+        </div>
+      </div>
+
+      <div class="tabs">
+        <button class="tab-btn active" id="btn-counts" onclick="showTab('counts')">Counts</button>
+        <button class="tab-btn" id="btn-hours" onclick="showTab('hours')">Hours</button>
+      </div>
+
+      <div class="tabs">
+        {period_buttons_html}
+      </div>
+    </div>
+
+    <div class="tab-panel active" id="tab-counts">
+      {counts_panels_html}
+    </div>
+    <div class="tab-panel" id="tab-hours">
+      {hours_panels_html}
+    </div>
+
+    <div class="project-info-section">
+      <h2>Project details</h2>
+      {tables_html}
+    </div>
+  </div>
+
+  <script>
+    var currentTab = "counts";
+    var currentPeriod = "{default_period}";
+
+    function showTab(name) {{
+      currentTab = name;
+      updateView();
+    }}
+
+    function showPeriod(period) {{
+      currentPeriod = period;
+      updateView();
+    }}
+
+    function updateView() {{
+      document.getElementById("tab-counts").classList.toggle("active", currentTab === "counts");
+      document.getElementById("tab-hours").classList.toggle("active", currentTab === "hours");
+      document.getElementById("btn-counts").classList.toggle("active", currentTab === "counts");
+      document.getElementById("btn-hours").classList.toggle("active", currentTab === "hours");
+
+      document.querySelectorAll(".period-btn").forEach(function(btn) {{
+        btn.classList.remove("active");
+      }});
+      var activeBtn = document.getElementById("btn-period-" + currentPeriod);
+      if (activeBtn) {{
+        activeBtn.classList.add("active");
+      }}
+
+      document.querySelectorAll(".period-panel").forEach(function(panel) {{
+        panel.classList.remove("active");
+      }});
+      var countsPanel = document.getElementById("period-counts-" + currentPeriod);
+      var hoursPanel = document.getElementById("period-hours-" + currentPeriod);
+      if (countsPanel) {{
+        countsPanel.classList.add("active");
+      }}
+      if (hoursPanel) {{
+        hoursPanel.classList.add("active");
+      }}
+
+      document.querySelectorAll(".period-meta").forEach(function(el) {{
+        el.classList.remove("active");
+      }});
+      var metaEl = document.getElementById("meta-" + currentPeriod);
+      if (metaEl) {{
+        metaEl.classList.add("active");
+      }}
+
+      document.querySelectorAll(".period-note").forEach(function(el) {{
+        el.classList.remove("active");
+      }});
+      var noteEl = document.getElementById("nn-note-" + currentPeriod);
+      if (noteEl) {{
+        noteEl.classList.add("active");
+      }}
+
+      document.querySelectorAll(".period-nn").forEach(function(el) {{
+        el.classList.remove("active");
+      }});
+      var pieEl = document.getElementById("nn-pie-block-" + currentPeriod);
+      if (pieEl) {{
+        pieEl.classList.add("active");
+      }}
+
+      var figId = currentTab + "-fig-" + currentPeriod;
+      var figEl = document.getElementById(figId);
+      if (figEl && window.Plotly) {{
+        Plotly.Plots.resize(figEl);
+      }}
+
+      var pieFigEl = document.getElementById("nn-pie-" + currentPeriod);
+      if (pieFigEl && window.Plotly) {{
+        Plotly.Plots.resize(pieFigEl);
+      }}
+    }}
+
+    window.addEventListener("load", function() {{
+      updateView();
+    }});
+  </script>
+</body>
+</html>
+"""
+
+    with open(out_html_path, "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+
 def export_tabbed_report(
     counts_fig: go.Figure,
     hours_fig: go.Figure,
@@ -2325,12 +2746,37 @@ def export_tabbed_report(
     return html_path, png_path
 
 
+def export_multi_period_report(
+    period_payloads: Dict[str, Dict[str, Any]],
+    output_dir: str,
+    output_archive_dir: str,
+    base_name: str,
+    archive_base_name: str,
+    export_date: str,
+    header_context: Dict[str, Any],
+    tables_html: str,
+) -> str:
+    html_path = os.path.join(output_dir, f"{base_name}.html")
+    dated_base_name = f"{archive_base_name}_generated_{export_date}"
+    dated_html_path = os.path.join(output_archive_dir, f"{dated_base_name}.html")
+
+    write_multi_period_tabbed_html(
+        period_payloads,
+        html_path,
+        header_context,
+        tables_html,
+    )
+
+    shutil.copyfile(html_path, dated_html_path)
+    return html_path
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate project portfolio reports.")
     parser.add_argument(
         "--report-type",
-        choices=["yearly", "monthly", "weekly", "all"],
-        default="all",
+        choices=["combined", "yearly", "monthly", "biweekly", "weekly", "all"],
+        default="combined",
         help="Report type to generate.",
     )
     parser.add_argument(
@@ -2374,78 +2820,76 @@ def generate_reports(report_type: str, asof_date: date) -> None:
     print(nn_status)
     _, project_color_map = build_color_maps(projects_df)
 
-    report_types = ["yearly", "monthly", "weekly"] if report_type == "all" else [report_type]
-    timeline_year = periods["yearly"]["end"].year
+    timeline_year = asof_date.year
 
-    for rtype in report_types:
-        period_info = periods[rtype]
-        period_start = period_info["start"]
-        period_end = period_info["end"]
-        period_label = period_info["label"]
-        period_key = period_info["key"]
+    if report_type in ("combined", "all"):
+        period_payloads: Dict[str, Dict[str, Any]] = {}
+        for rtype in ("weekly", "biweekly", "monthly", "yearly"):
+            period_info = periods[rtype]
+            period_start = period_info["start"]
+            period_end = period_info["end"]
+            period_label = period_info["label"]
 
-        time_entries_filtered = filter_time_entries_by_period(time_entries_df, period_start, period_end)
+            time_entries_filtered = filter_time_entries_by_period(time_entries_df, period_start, period_end)
 
-        nn_summary = None
-        nn_note = None
-        nn_pie_html = ""
-        hours_metrics_html = ""
-        if rtype in ("monthly", "yearly"):
-            if nn_df is None:
-                nn_note = nn_status
-            else:
-                nn_summary, nn_note = compute_nn_summary(nn_df, rtype, period_end, time_entries_filtered)
-                if nn_note:
-                    nn_note = f"NN_maandelijks: {nn_note}"
-            nn_pie_html = build_nn_pie_html(nn_summary)
-            hours_metrics_html = build_nn_metrics_html(nn_summary, nn_note)
+            nn_summary = None
+            nn_note = None
+            nn_pie_html = ""
+            hours_metrics_html = ""
+            if rtype in ("monthly", "yearly"):
+                if nn_df is None:
+                    nn_note = nn_status
+                else:
+                    nn_summary, nn_note = compute_nn_summary(nn_df, "monthly" if rtype == "monthly" else "yearly", period_end, time_entries_filtered)
+                    if nn_note:
+                        nn_note = f"NN_maandelijks: {nn_note}"
+                nn_pie_html = build_nn_pie_html(nn_summary, div_id=f"nn-pie-{rtype}")
+                hours_metrics_html = build_nn_metrics_html(nn_summary, nn_note)
 
-        projects_for_counts = projects_df
-        if rtype in ("weekly", "monthly"):
-            projects_for_counts = filter_projects_with_hours(projects_df, time_entries_filtered)
+            projects_for_counts = projects_df
+            if rtype in ("weekly", "biweekly", "monthly"):
+                projects_for_counts = filter_projects_with_hours(projects_df, time_entries_filtered)
 
-        counts_fig = build_counts_figure(
-            projects_for_counts,
-            export_date,
-            period_start,
-            period_end,
-            period_label,
-            project_color_map=project_color_map,
-            timeline_projects_df=projects_df,
-            timeline_year=timeline_year,
-        )
-        hours_fig = build_hours_figure(
-            projects_df,
-            time_entries_filtered,
-            export_date,
-            period_start,
-            period_end,
-            period_label,
-            report_type=rtype,
-        )
+            counts_fig = build_counts_figure(
+                projects_for_counts,
+                export_date,
+                period_start,
+                period_end,
+                period_label,
+                project_color_map=project_color_map,
+                timeline_projects_df=projects_df,
+                timeline_year=timeline_year,
+            )
+            hours_fig = build_hours_figure(
+                projects_df,
+                time_entries_filtered,
+                export_date,
+                period_start,
+                period_end,
+                period_label,
+                report_type=rtype,
+            )
 
-        period_range = f"{period_start.isoformat()} to {period_end.isoformat()}"
+            period_payloads[rtype] = dict(
+                label=period_label,
+                period_range=f"{period_start.isoformat()} to {period_end.isoformat()}",
+                counts_fig=counts_fig,
+                hours_fig=hours_fig,
+                hours_metrics_html=hours_metrics_html,
+                nn_pie_html=nn_pie_html,
+                nn_note=nn_note,
+            )
+
         header_context = dict(
             title_text="Project Portfolio Overview — Rens",
             export_date=export_date,
-            period_label=period_label,
-            period_range=period_range,
             **header_assets,
         )
 
-        if rtype == "yearly":
-            base_name = "project_report_yearly"
-            archive_base_name = f"project_report_yearly_{period_key}"
-        elif rtype == "monthly":
-            base_name = f"project_report_monthly_{period_key}"
-            archive_base_name = base_name
-        else:
-            base_name = f"project_report_weekly_{period_key}"
-            archive_base_name = base_name
-
-        html_path, png_path = export_tabbed_report(
-            counts_fig,
-            hours_fig,
+        base_name = "project_report"
+        archive_base_name = f"project_report_asof_{asof_date.isoformat()}"
+        html_path = export_multi_period_report(
+            period_payloads,
             REPORT_DIR,
             REPORTS_ARCHIVE_DIR,
             base_name,
@@ -2453,13 +2897,99 @@ def generate_reports(report_type: str, asof_date: date) -> None:
             export_date,
             header_context,
             tables_html,
-            hours_metrics_html,
-            nn_pie_html,
-            nn_note,
         )
+        print(f"Generated combined report -> {html_path}")
+        return
 
-        print(f"Generated {rtype} report: {period_range} -> {html_path}")
-        print(f"PNG exported: {png_path}")
+    rtype = report_type
+    if rtype not in periods:
+        raise SystemExit(f"Unknown report type: {rtype}")
+
+    period_info = periods[rtype]
+    period_start = period_info["start"]
+    period_end = period_info["end"]
+    period_label = period_info["label"]
+    period_key = period_info["key"]
+
+    time_entries_filtered = filter_time_entries_by_period(time_entries_df, period_start, period_end)
+
+    nn_summary = None
+    nn_note = None
+    nn_pie_html = ""
+    hours_metrics_html = ""
+    if rtype in ("monthly", "yearly"):
+        if nn_df is None:
+            nn_note = nn_status
+        else:
+            nn_summary, nn_note = compute_nn_summary(nn_df, "monthly" if rtype == "monthly" else "yearly", period_end, time_entries_filtered)
+            if nn_note:
+                nn_note = f"NN_maandelijks: {nn_note}"
+        nn_pie_html = build_nn_pie_html(nn_summary)
+        hours_metrics_html = build_nn_metrics_html(nn_summary, nn_note)
+
+    projects_for_counts = projects_df
+    if rtype in ("weekly", "biweekly", "monthly"):
+        projects_for_counts = filter_projects_with_hours(projects_df, time_entries_filtered)
+
+    counts_fig = build_counts_figure(
+        projects_for_counts,
+        export_date,
+        period_start,
+        period_end,
+        period_label,
+        project_color_map=project_color_map,
+        timeline_projects_df=projects_df,
+        timeline_year=timeline_year,
+    )
+    hours_fig = build_hours_figure(
+        projects_df,
+        time_entries_filtered,
+        export_date,
+        period_start,
+        period_end,
+        period_label,
+        report_type=rtype,
+    )
+
+    period_range = f"{period_start.isoformat()} to {period_end.isoformat()}"
+    header_context = dict(
+        title_text="Project Portfolio Overview — Rens",
+        export_date=export_date,
+        period_label=period_label,
+        period_range=period_range,
+        **header_assets,
+    )
+
+    if rtype == "yearly":
+        base_name = "project_report_yearly"
+        archive_base_name = f"project_report_yearly_{period_key}"
+    elif rtype == "monthly":
+        base_name = f"project_report_monthly_{period_key}"
+        archive_base_name = base_name
+    elif rtype == "biweekly":
+        base_name = f"project_report_biweekly_{period_key}"
+        archive_base_name = base_name
+    else:
+        base_name = f"project_report_weekly_{period_key}"
+        archive_base_name = base_name
+
+    html_path, png_path = export_tabbed_report(
+        counts_fig,
+        hours_fig,
+        REPORT_DIR,
+        REPORTS_ARCHIVE_DIR,
+        base_name,
+        archive_base_name,
+        export_date,
+        header_context,
+        tables_html,
+        hours_metrics_html,
+        nn_pie_html,
+        nn_note,
+    )
+
+    print(f"Generated {rtype} report: {period_range} -> {html_path}")
+    print(f"PNG exported: {png_path}")
 
 
 def main() -> None:

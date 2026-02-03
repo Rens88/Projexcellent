@@ -23,8 +23,11 @@ Ideetjes om rapportage te verbeteren:
 - Additionally to a weekly report, maak a two-weekly report following exactly the same logic as the weekly report.
 	
 **IN PROGRESS**
+- Generate one file
+- Add biweekly report.
 
 **DONE**
-Pie chart
 
 **COMMITTED**
+- Pie chart
+- Timeseries fix
