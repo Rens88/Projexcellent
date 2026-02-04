@@ -17,7 +17,29 @@ Ideetjes om rapportage te verbeteren:
 
 
 
-**IN PROGRESS**
+**IN PROGRESS** 
+** DELAYED BECAUSE OF NON-FUNCTIONING CODEX **
+Each project folder now also contains a folder "Deliverables" containing a readme.txt which contains the following text:
+"In this "Deliverables" folder you can put files that showcase what was delivered for this project.
+Image (.png) and text files (.txt) will be shown in the dashboard.
+Any other files will not be shown in the project overview dashboard, but can of course be stored here for convenience."
+- Check whether each project folder has a Deliverables folder (readme.txt doesn't necessarily have to be there), if not, throw a human readable error.
+- For each folder, read the .png and .txt (except readme.txt) files and keep them in memory so they can be used in the overview
+
+- Update the project overview
+-> Create a new Projects page
+--> Move the tabular project overview from the bottom of the page to a designated "Projects" page (see reoganization of buttons instruction below)
+--> Rather than showing the complete projects table for each project, initially just show the project title. Once the user clicks on the title, the table should unfold and become visible
+--> Rather than showing the projects next to each other horizontally, the projects should now be listed vertically
+--> If available, the .txt files in the "Deliverables" should be shown next to the tabular information once the user clicks on a project and unfolds the project information
+--> Similarly, any .png files should be shown next to that as well
+
+-> Reorganize buttons: 
+--> Add a "Projects" button on the same level as "Counts", "Hours" and "Percentage".
+--> Whenever Counts, Hours or Percentage is selected, the second row should remain to be 1-week, 2-weeks, Month and Year (to-date).
+--> Whenever "Projects" is selected, the second row should allow the user to filter at least based on status (Proposed, Active, On-hold, Closed, Cancelled or "all") but preferably also based on Priority, estimated_magnitude and even programma (if multiple, separate by |)
+--> Show tabular project overview on this page and make sure the second row of buttons (to filter) is functional
+
 
 
 **DONE**
