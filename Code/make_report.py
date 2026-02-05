@@ -912,7 +912,21 @@ def compute_nn_summary(
         return None, "No month rows found in NN_maandelijks."
 
     df = df.sort_values("__month")
+
+    completeness_through: Optional[date] = None
     target_month = pd.Timestamp(period_end.year, period_end.month, 1)
+    if period_type != "monthly":
+        # Tracking completeness is reported through the previous (fully completed) month.
+        first_of_month = date(period_end.year, period_end.month, 1)
+        prev_month_end = first_of_month - timedelta(days=1)
+        if prev_month_end.year != period_end.year:
+            return None, (
+                "Tracking completeness (YTD) is computed through the previous month; "
+                "no completed month is available yet for the current year."
+            )
+        completeness_through = prev_month_end
+        target_month = pd.Timestamp(prev_month_end.year, prev_month_end.month, 1)
+
     row = df.loc[df["__month"] == target_month]
     if row.empty:
         return None, f"No NN_maandelijks row found for {target_month.date().isoformat()}."
@@ -938,7 +952,17 @@ def compute_nn_summary(
         if remaining_col:
             remaining = _to_float(row.get(remaining_col))
 
-    project_logged_hours = float(time_entries_df_filtered["duration_hours"].sum()) if not time_entries_df_filtered.empty else 0.0
+    entries_for_completeness = time_entries_df_filtered
+    if completeness_through is not None and not entries_for_completeness.empty and "date" in entries_for_completeness.columns:
+        entries_for_completeness = entries_for_completeness.copy()
+        entries_for_completeness["date"] = pd.to_datetime(entries_for_completeness["date"], errors="coerce")
+        entries_for_completeness = entries_for_completeness.loc[
+            entries_for_completeness["date"] <= pd.Timestamp(completeness_through)
+        ].copy()
+
+    project_logged_hours = (
+        float(entries_for_completeness["duration_hours"].sum()) if not entries_for_completeness.empty else 0.0
+    )
     completeness_ratio = None
     if billed is not None and billed > 0:
         completeness_ratio = project_logged_hours / billed
@@ -950,6 +974,7 @@ def compute_nn_summary(
         remaining=remaining,
         project_logged_hours=project_logged_hours,
         completeness_ratio=completeness_ratio,
+        completeness_through=completeness_through,
     )
     return summary, None
 
@@ -1012,7 +1037,13 @@ def build_nn_metrics_html(nn_summary: Optional[Dict[str, Any]], note: Optional[s
     logged = nn_summary.get("project_logged_hours")
     ratio = nn_summary.get("completeness_ratio")
     period_type = nn_summary.get("period_type")
-    billed_label = "Billed (month)" if period_type == "monthly" else "Billed (ytd)"
+    scope_suffix = ""
+    if period_type != "monthly":
+        through = nn_summary.get("completeness_through")
+        through_text = through.isoformat() if isinstance(through, date) else ""
+        scope_suffix = f" (through {through_text})" if through_text else " (through previous month)"
+
+    billed_label = "Billed (month)" if period_type == "monthly" else f"Billed (ytd){scope_suffix}"
 
     def fmt(val: Optional[float]) -> str:
         if val is None:
@@ -1020,12 +1051,15 @@ def build_nn_metrics_html(nn_summary: Optional[Dict[str, Any]], note: Optional[s
         return f"{val:.0f}"
 
     ratio_text = f"{ratio * 100:.0f}%" if ratio is not None else "n/a"
+    logged_label = "Project logged hours" if period_type == "monthly" else f"Project logged hours{scope_suffix}"
+    completeness_label = "Tracking completeness" if period_type == "monthly" else f"Tracking completeness{scope_suffix}"
+
     return (
         "<div class='nn-metrics'>"
         "<div><b>" + html.escape(billed_label) + "</b>: " + html.escape(fmt(billed)) + "</div>"
         "<div><b>Remaining</b>: " + html.escape(fmt(remaining)) + "</div>"
-        "<div><b>Project logged hours</b>: " + html.escape(fmt(logged)) + "</div>"
-        "<div><b>Tracking completeness</b>: " + html.escape(ratio_text) + "</div>"
+        "<div><b>" + html.escape(logged_label) + "</b>: " + html.escape(fmt(logged)) + "</div>"
+        "<div><b>" + html.escape(completeness_label) + "</b>: " + html.escape(ratio_text) + "</div>"
         "</div>"
     )
 
@@ -1104,23 +1138,23 @@ def build_logged_hours_breakdown_html(
 ) -> str:
     if time_entries_df_filtered is None or time_entries_df_filtered.empty:
         return (
-            "<div class='hours-breakdown'>"
-            f"<div class='hours-breakdown-header'><h3>{html.escape(title)}</h3></div>"
+            "<details class='hours-breakdown'>"
+            f"<summary>{html.escape(title)}</summary>"
             "<div class='hours-breakdown-note'>No time log entries in this period.</div>"
-            "</div>"
+            "</details>"
         )
 
     required_cols = {"project_id", "duration_hours"}
     missing = [c for c in required_cols if c not in time_entries_df_filtered.columns]
     if missing:
         return (
-            "<div class='hours-breakdown'>"
-            f"<div class='hours-breakdown-header'><h3>{html.escape(title)}</h3></div>"
+            "<details class='hours-breakdown'>"
+            f"<summary>{html.escape(title)}</summary>"
             "<div class='hours-breakdown-note'>"
             "Time log entries are missing expected columns: "
             + html.escape(", ".join(missing))
             + "</div>"
-            "</div>"
+            "</details>"
         )
 
     entries = time_entries_df_filtered.copy()
@@ -1146,10 +1180,10 @@ def build_logged_hours_breakdown_html(
         entries["duration_minutes"] = entries["duration_hours"] * 60.0
     if entries.empty:
         return (
-            "<div class='hours-breakdown'>"
-            f"<div class='hours-breakdown-header'><h3>{html.escape(title)}</h3></div>"
+            "<details class='hours-breakdown'>"
+            f"<summary>{html.escape(title)}</summary>"
             "<div class='hours-breakdown-note'>No logged hours in this period.</div>"
-            "</div>"
+            "</details>"
         )
 
     totals = (
@@ -1227,15 +1261,13 @@ def build_logged_hours_breakdown_html(
 
     note_text = "Percentages are of the total logged time in this period." if show_percentage else "Click a project to expand."
     return (
-        "<div class='hours-breakdown'>"
-        "<div class='hours-breakdown-header'>"
-        f"<h3>{html.escape(title)}</h3>"
+        "<details class='hours-breakdown'>"
+        f"<summary>{html.escape(title)}</summary>"
         f"<div class='hours-breakdown-note'>{html.escape(note_text)}</div>"
-        "</div>"
         "<div class='hours-breakdown-list'>"
         + "".join(projects_html)
         + "</div>"
-        "</div>"
+        "</details>"
     )
 
 
@@ -2261,62 +2293,135 @@ def build_hours_figure(
     report_type: str,
 ) -> go.Figure:
     if report_type in ("weekly", "biweekly"):
-        total_rows = 4
+        total_rows = 5
+        separator_row = 2
+        row_heights = [0.235, 0.06, 0.235, 0.235, 0.235]
     else:
-        total_rows = 6
+        total_rows = 7
+        separator_row = 4
+        row_heights = [0.1567, 0.1567, 0.1567, 0.06, 0.1567, 0.1567, 0.1567]
     _, project_color_map = build_color_maps(projects_df)
     vertical_spacing = 0.10 if report_type in ("weekly", "biweekly") else 0.09
-    fig = make_subplots(rows=total_rows, cols=1, shared_xaxes=False, vertical_spacing=vertical_spacing)
+    fig = make_subplots(
+        rows=total_rows, cols=1, shared_xaxes=False, vertical_spacing=vertical_spacing, row_heights=row_heights
+    )
 
     display_start = period_start
     display_end = period_end
     if report_type == "yearly":
         display_end = date(period_start.year, 12, 31)
 
-    add_stacked_hours_bars(fig, projects_df, time_entries_df_filtered, "programma", 1,
-                           "Hours per programma (stacked: each project contributes its hours)",
-                           project_color_map)
-    add_stacked_hours_bars(fig, projects_df, time_entries_df_filtered, "theme", 2,
-                           "Hours per theme (stacked: each project contributes its hours)",
-                           project_color_map)
-    add_stacked_hours_bars(fig, projects_df, time_entries_df_filtered, "requester", 3,
-                           "Hours per requester (stacked: each project contributes its hours)",
-                           project_color_map)
     if report_type in ("weekly", "biweekly"):
-        add_reported_hours_per_project(fig, projects_df, time_entries_df_filtered, 4,
-                                       "Reported hours per project", project_color_map)
-    else:
-        add_estimated_magnitude_per_week(
+        add_reported_hours_per_project(
             fig,
             projects_df,
-            4,
-            "Estimated magnitude per week (stacked by project)",
+            time_entries_df_filtered,
+            1,
+            "Reported time spent per project",
             project_color_map,
-            period_start=display_start,
-            period_end=display_end,
+        )
+        add_stacked_hours_bars(
+            fig,
+            projects_df,
+            time_entries_df_filtered,
+            "programma",
+            3,
+            "Hours per programma (stacked: each project contributes its hours)",
+            project_color_map,
+        )
+        add_stacked_hours_bars(
+            fig,
+            projects_df,
+            time_entries_df_filtered,
+            "theme",
+            4,
+            "Hours per theme (stacked: each project contributes its hours)",
+            project_color_map,
+        )
+        add_stacked_hours_bars(
+            fig,
+            projects_df,
+            time_entries_df_filtered,
+            "requester",
+            5,
+            "Hours per requester (stacked: each project contributes its hours)",
+            project_color_map,
+        )
+    else:
+        add_reported_hours_per_project(
+            fig,
+            projects_df,
+            time_entries_df_filtered,
+            1,
+            "Reported time spent per project",
+            project_color_map,
         )
         add_hours_per_week(
             fig,
             projects_df,
             time_entries_df_filtered,
-            5,
-            "Reported hours per week (stacked by project)",
+            2,
+            "Reported time per week (stacked by project)",
             project_color_map,
             display_start=display_start,
             display_end=display_end,
             data_start=period_start,
             data_end=period_end,
         )
-        add_reported_hours_per_project(
+        add_estimated_magnitude_per_week(
+            fig,
+            projects_df,
+            3,
+            "Estimated magnitude per week (stacked by project)",
+            project_color_map,
+            period_start=display_start,
+            period_end=display_end,
+        )
+        add_stacked_hours_bars(
             fig,
             projects_df,
             time_entries_df_filtered,
+            "programma",
+            5,
+            "Hours per programma (stacked: each project contributes its hours)",
+            project_color_map,
+        )
+        add_stacked_hours_bars(
+            fig,
+            projects_df,
+            time_entries_df_filtered,
+            "theme",
             6,
-            "Reported hours per project",
+            "Hours per theme (stacked: each project contributes its hours)",
+            project_color_map,
+        )
+        add_stacked_hours_bars(
+            fig,
+            projects_df,
+            time_entries_df_filtered,
+            "requester",
+            7,
+            "Hours per requester (stacked: each project contributes its hours)",
             project_color_map,
         )
 
     apply_axis_style(fig, total_rows)
+
+    fig.add_annotation(
+        text="<b>Deep-dive</b>",
+        x=0,
+        xref=axis_domain_ref("x", separator_row),
+        y=0.5,
+        yref=axis_domain_ref("y", separator_row),
+        showarrow=False,
+        align="left",
+        font=dict(size=22, color=BASE_BLUE),
+        row=separator_row,
+        col=1,
+    )
+    fig.update_xaxes(visible=False, row=separator_row, col=1)
+    fig.update_yaxes(visible=False, row=separator_row, col=1)
+
     fig.update_layout(
         barmode="stack",
         height=1600 if report_type in ("weekly", "biweekly") else 2300,
@@ -2516,14 +2621,14 @@ def write_tabbed_html(
       padding-top: 8px;
       box-shadow: 0 2px 6px rgba(0,0,0,0.08);
     }}
-    .report-header {{
-      display: flex;
-      justify-content: space-between;
-      gap: 24px;
-      align-items: flex-start;
-      flex-wrap: wrap;
-      padding: 16px 0 8px;
-    }}
+	    .report-header {{
+	      display: flex;
+	      justify-content: space-between;
+	      gap: 24px;
+	      align-items: flex-start;
+	      flex-wrap: wrap;
+	      padding: 12px 0 4px;
+	    }}
     .header-left h1 {{
       margin: 0 0 6px 0;
       font-size: 26px;
@@ -2561,13 +2666,13 @@ def write_tabbed_html(
       height: 64px;
       object-fit: contain;
     }}
-    .tabs {{
-      display: flex;
-      gap: 8px;
-      margin: 4px 0 12px;
-      padding-bottom: 12px;
-      flex-wrap: wrap;
-    }}
+	    .tabs {{
+	      display: flex;
+	      gap: 8px;
+	      margin: 2px 0 8px;
+	      padding-bottom: 8px;
+	      flex-wrap: wrap;
+	    }}
     .tab-btn {{
       padding: 8px 16px;
       border: 1px solid #CCC;
@@ -2932,42 +3037,47 @@ def write_multi_period_tabbed_html(
                 )
             )
 
-        counts_fig = payload["counts_fig"]
-        hours_fig = payload["hours_fig"]
-        percentage_fig = payload["percentage_fig"]
-        counts_div_id = f"counts-fig-{period_id}"
-        hours_div_id = f"hours-fig-{period_id}"
-        percentage_div_id = f"percentage-fig-{period_id}"
-        counts_html = pio.to_html(counts_fig, include_plotlyjs=False, full_html=False, div_id=counts_div_id)
-        hours_html = pio.to_html(hours_fig, include_plotlyjs=False, full_html=False, div_id=hours_div_id)
-        percentage_html = pio.to_html(percentage_fig, include_plotlyjs=False, full_html=False, div_id=percentage_div_id)
-        hours_metrics_html = payload.get("hours_metrics_html") or ""
-        percentage_metrics_html = payload.get("percentage_metrics_html") or hours_metrics_html
+        if "counts" in enabled_tabs_norm:
+            counts_fig = payload["counts_fig"]
+            counts_div_id = f"counts-fig-{period_id}"
+            counts_html = pio.to_html(counts_fig, include_plotlyjs=False, full_html=False, div_id=counts_div_id)
+            period_counts_panels_parts.append(
+                (
+                    f"<div class=\"period-panel{' active' if is_default else ''}\" "
+                    f"id=\"period-counts-{period_id}\">{counts_html}</div>"
+                )
+            )
 
-        period_counts_panels_parts.append(
-            (
-                f"<div class=\"period-panel{' active' if is_default else ''}\" "
-                f"id=\"period-counts-{period_id}\">{counts_html}</div>"
+        if "hours" in enabled_tabs_norm:
+            hours_fig = payload["hours_fig"]
+            hours_div_id = f"hours-fig-{period_id}"
+            hours_html = pio.to_html(hours_fig, include_plotlyjs=False, full_html=False, div_id=hours_div_id)
+            hours_metrics_html = payload.get("hours_metrics_html") or ""
+            period_hours_panels_parts.append(
+                (
+                    f"<div class=\"period-panel{' active' if is_default else ''}\" "
+                    f"id=\"period-hours-{period_id}\">"
+                    f"<div class=\"hours-metrics\">{hours_metrics_html}</div>"
+                    f"{hours_html}"
+                    "</div>"
+                )
             )
-        )
-        period_hours_panels_parts.append(
-            (
-                f"<div class=\"period-panel{' active' if is_default else ''}\" "
-                f"id=\"period-hours-{period_id}\">"
-                f"<div class=\"hours-metrics\">{hours_metrics_html}</div>"
-                f"{hours_html}"
-                "</div>"
+
+        if "percentage" in enabled_tabs_norm:
+            percentage_fig = payload["percentage_fig"]
+            percentage_div_id = f"percentage-fig-{period_id}"
+            percentage_html = pio.to_html(percentage_fig, include_plotlyjs=False, full_html=False, div_id=percentage_div_id)
+            hours_metrics_html = payload.get("hours_metrics_html") or ""
+            percentage_metrics_html = payload.get("percentage_metrics_html") or hours_metrics_html
+            period_percentage_panels_parts.append(
+                (
+                    f"<div class=\"period-panel{' active' if is_default else ''}\" "
+                    f"id=\"period-percentage-{period_id}\">"
+                    f"<div class=\"hours-metrics\">{percentage_metrics_html}</div>"
+                    f"{percentage_html}"
+                    "</div>"
+                )
             )
-        )
-        period_percentage_panels_parts.append(
-            (
-                f"<div class=\"period-panel{' active' if is_default else ''}\" "
-                f"id=\"period-percentage-{period_id}\">"
-                f"<div class=\"hours-metrics\">{percentage_metrics_html}</div>"
-                f"{percentage_html}"
-                "</div>"
-            )
-        )
 
     period_group_buttons_html = "\n".join(period_group_buttons_html_parts)
     month_buttons_html = "\n".join(month_buttons_html_parts)
@@ -2977,6 +3087,30 @@ def write_multi_period_tabbed_html(
     counts_panels_html = "\n".join(period_counts_panels_parts)
     hours_panels_html = "\n".join(period_hours_panels_parts)
     percentage_panels_html = "\n".join(period_percentage_panels_parts)
+
+    tab_labels = {"counts": "Counts", "hours": "Hours", "percentage": "Percentage", "projects": "Projects"}
+    tab_buttons_html = "".join(
+        [
+            (
+                f"<button class=\"tab-btn{' active' if t == default_tab else ''}\" "
+                f"id=\"btn-{t}\" onclick=\"showTab('{t}')\">{tab_labels[t]}</button>"
+            )
+            for t in enabled_tabs_norm
+        ]
+    )
+
+    tab_panels: List[str] = []
+    for t in enabled_tabs_norm:
+        panel_css = "tab-panel active" if t == default_tab else "tab-panel"
+        if t == "counts":
+            tab_panels.append(f"<div class=\"{panel_css}\" id=\"tab-counts\">{counts_panels_html}</div>")
+        elif t == "hours":
+            tab_panels.append(f"<div class=\"{panel_css}\" id=\"tab-hours\">{hours_panels_html}</div>")
+        elif t == "percentage":
+            tab_panels.append(f"<div class=\"{panel_css}\" id=\"tab-percentage\">{percentage_panels_html}</div>")
+        elif t == "projects":
+            tab_panels.append(f"<div class=\"{panel_css}\" id=\"tab-projects\">{projects_html}</div>")
+    tab_panels_html = "".join(tab_panels)
 
     html_content = f"""<!doctype html>
 <html lang="en">
@@ -3456,13 +3590,17 @@ def export_tabbed_report(
     percentage_metrics_html: str,
     nn_pie_html: str,
     nn_note: Optional[str],
-) -> Tuple[str, str]:
+) -> Tuple[str, str, str]:
     html_path = os.path.join(output_dir, f"{base_name}.html")
     png_path = os.path.join(output_dir, f"{base_name}.png")
+    lite_html_path = os.path.join(output_dir, f"{base_name}_percentage_projects.html")
 
     dated_base_name = f"{archive_base_name}_generated_{export_date}"
     dated_html_path = os.path.join(output_archive_dir, f"{dated_base_name}.html")
     dated_png_path = os.path.join(output_archive_dir, f"{dated_base_name}.png")
+    dated_lite_html_path = os.path.join(
+        output_archive_dir, f"{archive_base_name}_percentage_projects_generated_{export_date}.html"
+    )
 
     write_tabbed_html(
         counts_fig,
@@ -3476,13 +3614,27 @@ def export_tabbed_report(
         nn_pie_html,
         nn_note,
     )
+    write_tabbed_html(
+        counts_fig,
+        hours_fig,
+        percentage_fig,
+        lite_html_path,
+        header_context,
+        tables_html,
+        hours_metrics_html,
+        percentage_metrics_html,
+        nn_pie_html,
+        nn_note,
+        enabled_tabs=("percentage", "projects"),
+    )
 
     counts_fig.write_image(png_path, scale=2)  # requires kaleido
 
     shutil.copyfile(html_path, dated_html_path)
     shutil.copyfile(png_path, dated_png_path)
+    shutil.copyfile(lite_html_path, dated_lite_html_path)
 
-    return html_path, png_path
+    return html_path, png_path, lite_html_path
 
 
 def export_multi_period_report(
@@ -3494,20 +3646,35 @@ def export_multi_period_report(
     export_date: str,
     header_context: Dict[str, Any],
     tables_html: str,
-) -> str:
+    projects_filters_html: str = "",
+) -> Tuple[str, str]:
     html_path = os.path.join(output_dir, f"{base_name}.html")
+    lite_html_path = os.path.join(output_dir, f"{base_name}_percentage_projects.html")
     dated_base_name = f"{archive_base_name}_generated_{export_date}"
     dated_html_path = os.path.join(output_archive_dir, f"{dated_base_name}.html")
+    dated_lite_html_path = os.path.join(
+        output_archive_dir, f"{archive_base_name}_percentage_projects_generated_{export_date}.html"
+    )
 
     write_multi_period_tabbed_html(
         period_payloads,
         html_path,
         header_context,
         tables_html,
+        projects_filters_html=projects_filters_html,
+    )
+    write_multi_period_tabbed_html(
+        period_payloads,
+        lite_html_path,
+        header_context,
+        tables_html,
+        projects_filters_html=projects_filters_html,
+        enabled_tabs=("percentage", "projects"),
     )
 
     shutil.copyfile(html_path, dated_html_path)
-    return html_path
+    shutil.copyfile(lite_html_path, dated_lite_html_path)
+    return html_path, lite_html_path
 
 
 def parse_args() -> argparse.Namespace:
@@ -3703,7 +3870,7 @@ def generate_reports(report_type: str, asof_date: date) -> None:
 
         base_name = "project_report"
         archive_base_name = f"project_report_asof_{asof_date.isoformat()}"
-        html_path = export_multi_period_report(
+        html_path, lite_html_path = export_multi_period_report(
             period_payloads,
             REPORT_DIR,
             REPORTS_ARCHIVE_DIR,
@@ -3714,6 +3881,7 @@ def generate_reports(report_type: str, asof_date: date) -> None:
             tables_html,
         )
         print(f"Generated combined report -> {html_path}")
+        print(f"Generated lite report -> {lite_html_path}")
         return
 
     rtype = report_type
@@ -3799,7 +3967,7 @@ def generate_reports(report_type: str, asof_date: date) -> None:
         base_name = f"project_report_weekly_{period_key}"
         archive_base_name = base_name
 
-    html_path, png_path = export_tabbed_report(
+    html_path, png_path, lite_html_path = export_tabbed_report(
         counts_fig,
         hours_fig,
         percentage_fig,
@@ -3817,6 +3985,7 @@ def generate_reports(report_type: str, asof_date: date) -> None:
     )
 
     print(f"Generated {rtype} report: {period_range} -> {html_path}")
+    print(f"Generated lite report -> {lite_html_path}")
     print(f"PNG exported: {png_path}")
 
 
@@ -4063,6 +4232,13 @@ def _projects_filter_controls_html(projects_df: pd.DataFrame) -> str:
         "<div class='projects-filter-label'>Programma</div>"
         f"<select id='filter-programma' onchange='applyProjectsFilters()'>{opts(programma_list)}</select>"
         "</div>"
+        "<div class='projects-filter-block'>"
+        "<div class='projects-filter-label'>Deliverables</div>"
+        "<label class='projects-checkbox'>"
+        "<input type='checkbox' id='filter-has-deliverables' onchange='applyProjectsFilters()'/> "
+        "Has deliverables"
+        "</label>"
+        "</div>"
         "</div>"
         "</div>"
     )
@@ -4070,14 +4246,48 @@ def _projects_filter_controls_html(projects_df: pd.DataFrame) -> str:
 
 def build_projects_page_html(
     projects_df: pd.DataFrame,
+    time_entries_df: pd.DataFrame,
     project_info_map: Dict[str, Dict[str, Any]],
     deliverables_map: Dict[str, Dict[str, Any]],
 ) -> Tuple[str, str]:
     """Returns (filters_html, projects_list_html)."""
     filters_html = _projects_filter_controls_html(projects_df)
 
+    # Sort projects by most recent reported hours (latest timelog date), descending
+    last_logged_by_project: Dict[str, Optional[pd.Timestamp]] = {}
+    if (
+        time_entries_df is not None
+        and not time_entries_df.empty
+        and "project_id" in time_entries_df.columns
+        and "date" in time_entries_df.columns
+    ):
+        tmp = time_entries_df[["project_id", "date"]].copy()
+        tmp["project_id"] = tmp["project_id"].astype(str).str.strip()
+        tmp["date"] = pd.to_datetime(tmp["date"], errors="coerce")
+        grouped = tmp.dropna(subset=["date"]).groupby("project_id")["date"].max()
+        last_logged_by_project = {str(pid).strip(): ts for pid, ts in grouped.items() if str(pid).strip()}
+
+    projects_view = projects_df.copy()
+    projects_view["project_id"] = projects_view.get("project_id", pd.Series(dtype="object")).astype(str).str.strip()
+    projects_view["__last_log_date"] = projects_view["project_id"].map(last_logged_by_project)
+    projects_view["__last_log_date"] = pd.to_datetime(projects_view["__last_log_date"], errors="coerce")
+    sort_cols = ["__last_log_date"]
+    ascending = [False]
+    if "created_at" in projects_view.columns:
+        sort_cols.append("created_at")
+        ascending.append(False)
+    sort_cols.append("project_id")
+    ascending.append(True)
+    projects_view = projects_view.sort_values(sort_cols, ascending=ascending, na_position="last").reset_index(drop=True)
+
+    what_i_did_col: Optional[str] = None
+    for candidate in ("WhatIDid*", "WhatIDid"):
+        if time_entries_df is not None and not time_entries_df.empty and candidate in time_entries_df.columns:
+            what_i_did_col = candidate
+            break
+
     items: List[str] = []
-    for _, row in projects_df.iterrows():
+    for _, row in projects_view.iterrows():
         project_id = str(row.get("project_id", "")).strip()
         project_name = str(row.get("project_name", project_id)).strip() or project_id
 
@@ -4104,6 +4314,7 @@ def build_projects_page_html(
         )
 
         dels = deliverables_map.get(project_id, {"texts": [], "images": []})
+        has_deliverables = bool((dels.get("texts") or []) or (dels.get("images") or []))
         txt_blocks: List[str] = []
         for t in dels.get("texts", []) or []:
             fn = html.escape(str(t.get("filename", "")))
@@ -4130,21 +4341,81 @@ def build_projects_page_html(
         text_col = "<div class='deliverables-text'>" + "".join(txt_blocks) + "</div>" if txt_blocks else ""
         img_col = "<div class='deliverables-images'>" + "".join(img_blocks) + "</div>" if img_blocks else ""
 
+        # Recent time logs table (most recent entries)
+        timelog_html = ""
+        if (
+            time_entries_df is not None
+            and not time_entries_df.empty
+            and "project_id" in time_entries_df.columns
+            and "duration_minutes" in time_entries_df.columns
+        ):
+            proj_entries = time_entries_df.loc[time_entries_df["project_id"].astype(str).str.strip() == project_id].copy()
+            if not proj_entries.empty:
+                if "date" in proj_entries.columns:
+                    proj_entries["date"] = pd.to_datetime(proj_entries["date"], errors="coerce")
+                    proj_entries = proj_entries.sort_values(["date"], ascending=False, na_position="last")
+                proj_entries = proj_entries.head(8)
+
+                rows: List[str] = []
+                for _, entry in proj_entries.iterrows():
+                    d = entry.get("date")
+                    date_text = ""
+                    try:
+                        if pd.notna(d):
+                            date_text = pd.Timestamp(d).date().isoformat()
+                    except Exception:
+                        date_text = ""
+
+                    dur_text = _format_minutes_hhmm(entry.get("duration_minutes"))
+                    desc_val = entry.get(what_i_did_col) if what_i_did_col else ""
+                    desc_html = _escape_html_multiline(desc_val).strip()
+                    if not desc_html:
+                        desc_html = "<span class='hours-entry-empty'>(no details)</span>"
+                    rows.append(
+                        "<tr>"
+                        f"<td class='timelog-date'>{html.escape(date_text)}</td>"
+                        f"<td class='timelog-duration'>{html.escape(dur_text)}</td>"
+                        f"<td>{desc_html}</td>"
+                        "</tr>"
+                    )
+
+                timelog_html = (
+                    "<div class='project-timelog'>"
+                    "<div class='project-timelog-title'>Recent time logs</div>"
+                    "<table class='project-timelog-table'>"
+                    "<thead><tr><th>Date</th><th>Duration</th><th>Details</th></tr></thead>"
+                    "<tbody>"
+                    + "".join(rows)
+                    + "</tbody>"
+                    "</table>"
+                    "</div>"
+                )
+
         expanded = (
             "<div class='project-expanded'>"
-            "<div class='project-col project-col-table'>" + info_table + "</div>"
+            "<div class='project-col project-col-table'>" + info_table + timelog_html + "</div>"
             + ("<div class='project-col project-col-text'>" + text_col + "</div>" if text_col else "")
             + ("<div class='project-col project-col-images'>" + img_col + "</div>" if img_col else "")
             + "</div>"
         )
+
+        last_log_ts = last_logged_by_project.get(project_id)
+        last_log_text = ""
+        if last_log_ts is not None and pd.notna(last_log_ts):
+            try:
+                last_log_text = pd.Timestamp(last_log_ts).date().isoformat()
+            except Exception:
+                last_log_text = ""
+        summary_suffix = f" <span class='project-last-log'>(last log: {html.escape(last_log_text)})</span>" if last_log_text else ""
 
         items.append(
             "<details class='project-item' "
             f"data-status='{html.escape(status)}' "
             f"data-priority='{html.escape(priority)}' "
             f"data-magnitude='{html.escape(magnitude)}' "
-            f"data-programmas='{html.escape(programma_attr)}'>"
-            f"<summary>{html.escape(project_id)} — {html.escape(project_name)}</summary>"
+            f"data-programmas='{html.escape(programma_attr)}' "
+            f"data-has-deliverables='{'1' if has_deliverables else '0'}'>"
+            f"<summary>{html.escape(project_id)} — {html.escape(project_name)}{summary_suffix}</summary>"
             f"{expanded}"
             "</details>"
         )
@@ -4164,11 +4435,32 @@ def write_tabbed_html(
     percentage_metrics_html: str,
     nn_pie_html: str,
     nn_note: Optional[str],
+    enabled_tabs: Tuple[str, ...] = ("hours", "percentage", "projects"),
 ) -> None:
-    """UPDATED: adds Projects tab; uses tables_html as the Projects content HTML."""
-    counts_html = pio.to_html(counts_fig, include_plotlyjs=False, full_html=False, div_id="counts-fig")
-    hours_html = pio.to_html(hours_fig, include_plotlyjs=False, full_html=False, div_id="hours-fig")
-    percentage_html = pio.to_html(percentage_fig, include_plotlyjs=False, full_html=False, div_id="percentage-fig")
+    """Write a single-period HTML report with configurable tabs."""
+    enabled_tabs_norm: List[str] = []
+    for t in enabled_tabs:
+        if t in ("counts", "hours", "percentage", "projects") and t not in enabled_tabs_norm:
+            enabled_tabs_norm.append(t)
+    if not enabled_tabs_norm:
+        enabled_tabs_norm = ["percentage", "projects"]
+    default_tab = enabled_tabs_norm[0]
+
+    counts_html = (
+        pio.to_html(counts_fig, include_plotlyjs=False, full_html=False, div_id="counts-fig")
+        if "counts" in enabled_tabs_norm
+        else ""
+    )
+    hours_html = (
+        pio.to_html(hours_fig, include_plotlyjs=False, full_html=False, div_id="hours-fig")
+        if "hours" in enabled_tabs_norm
+        else ""
+    )
+    percentage_html = (
+        pio.to_html(percentage_fig, include_plotlyjs=False, full_html=False, div_id="percentage-fig")
+        if "percentage" in enabled_tabs_norm
+        else ""
+    )
     plotly_cdn = _plotly_cdn_src()
 
     title_text = html.escape(str(header_context.get("title_text", "Project Portfolio Overview")))
@@ -4191,8 +4483,42 @@ def write_tabbed_html(
         else ""
     )
 
-    # tables_html now expected to be the Projects tab HTML (filters + list)
     projects_html = tables_html or ""
+
+    tab_labels = {"counts": "Counts", "hours": "Hours", "percentage": "Percentage", "projects": "Projects"}
+    tab_buttons_html = "".join(
+        [
+            (
+                f"<button class=\"tab-btn{' active' if t == default_tab else ''}\" "
+                f"id=\"btn-{t}\" onclick=\"showTab('{t}')\">{tab_labels[t]}</button>"
+            )
+            for t in enabled_tabs_norm
+        ]
+    )
+
+    tab_panels: List[str] = []
+    for t in enabled_tabs_norm:
+        panel_css = "tab-panel active" if t == default_tab else "tab-panel"
+        if t == "counts":
+            tab_panels.append(f"<div class=\"{panel_css}\" id=\"tab-counts\">{counts_html}</div>")
+        elif t == "hours":
+            tab_panels.append(
+                f"<div class=\"{panel_css}\" id=\"tab-hours\">"
+                f"<div class='hours-metrics'>{hours_metrics_html}</div>"
+                f"{hours_html}"
+                f"</div>"
+            )
+        elif t == "percentage":
+            tab_panels.append(
+                f"<div class=\"{panel_css}\" id=\"tab-percentage\">"
+                f"<div class='hours-metrics'>{percentage_metrics_html}</div>"
+                f"{percentage_html}"
+                f"</div>"
+            )
+        elif t == "projects":
+            tab_panels.append(f"<div class=\"{panel_css}\" id=\"tab-projects\">{projects_html}</div>")
+
+    tab_panels_html = "".join(tab_panels)
 
     html_content = f"""<!doctype html>
 <html lang="en">
@@ -4268,23 +4594,129 @@ def write_tabbed_html(
     .tab-panel {{ display: none; }}
     .tab-panel.active {{ display: block; }}
     .hours-metrics {{ margin: 6px 0 16px; }}
-    .hours-breakdown {{
+	    .hours-breakdown {{
+	      background: #FFF;
+	      border: 1px solid #DDD;
+	      border-radius: 10px;
+	      padding: 12px;
+	      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+	    }}
+	    details.hours-breakdown summary {{
+	      cursor: pointer;
+	      font-weight: 700;
+	      list-style: none;
+	      outline: none;
+	    }}
+	    details.hours-breakdown summary::-webkit-details-marker {{
+	      display: none;
+	    }}
+	    details.hours-breakdown summary::before {{
+	      content: "▸";
+	      display: inline-block;
+	      width: 1em;
+	      color: #01378A;
+	    }}
+	    details.hours-breakdown[open] summary::before {{
+	      content: "▾";
+	    }}
+	    .hours-breakdown-header {{
+	      display: flex;
+	      align-items: baseline;
+	      justify-content: space-between;
+	      gap: 10px;
+	      flex-wrap: wrap;
+	      margin-bottom: 8px;
+	    }}
+	    .hours-breakdown h3 {{ margin: 0; font-size: 16px; }}
+	    .hours-breakdown-note {{ margin-top: 8px; font-size: 12px; color: #444; }}
+    .hours-breakdown-list {{
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }}
+    .hours-project {{
       background: #FFF;
-      border: 1px solid #DDD;
-      border-radius: 10px;
-      padding: 12px;
+      border: 1px solid #EEE;
+      border-radius: 8px;
+      padding: 6px 10px;
+    }}
+    .hours-project[open] {{
+      border-color: #CCC;
       box-shadow: 0 1px 2px rgba(0,0,0,0.05);
     }}
-    .hours-breakdown-header {{
-      display: flex;
-      align-items: baseline;
-      justify-content: space-between;
-      gap: 10px;
-      flex-wrap: wrap;
-      margin-bottom: 8px;
+    .hours-project summary {{
+      cursor: pointer;
+      font-weight: 600;
+      list-style: none;
+      outline: none;
     }}
-    .hours-breakdown h3 {{ margin: 0; font-size: 16px; }}
-    .hours-breakdown-note {{ font-size: 12px; color: #444; }}
+    .hours-project summary::-webkit-details-marker {{
+      display: none;
+    }}
+    .hours-project summary::before {{
+      content: "▸";
+      display: inline-block;
+      width: 1em;
+      color: #01378A;
+    }}
+    .hours-project[open] summary::before {{
+      content: "▾";
+    }}
+    .hours-project-total {{
+      font-variant-numeric: tabular-nums;
+    }}
+    .hours-project-percent {{
+      color: #444;
+      font-weight: 600;
+    }}
+    .hours-project-entries {{
+      margin-top: 8px;
+      padding-left: 1.2em;
+    }}
+    .hours-entry-table {{
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }}
+    .hours-entry-table th {{
+      text-align: left;
+      padding: 6px 6px;
+      color: #555;
+      border-bottom: 1px solid #EEE;
+    }}
+    .hours-entry-table td {{
+      padding: 6px 6px;
+      border-bottom: 1px solid #F3F3F3;
+      vertical-align: top;
+      word-break: break-word;
+    }}
+    .hours-entry-duration {{
+      width: 110px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }}
+    .hours-entry-percent {{
+      width: 90px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }}
+    .hours-entry-empty {{
+      color: #777;
+      font-style: italic;
+    }}
+    .nn-metrics {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px 18px;
+      font-size: 14px;
+      background: #FFF;
+      border: 1px solid #DDD;
+      border-radius: 8px;
+      padding: 10px 12px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }}
 
     /* Projects page styles */
     .projects-controls {{
@@ -4305,6 +4737,8 @@ def write_tabbed_html(
     .projects-filter-label {{ font-size: 12px; color: #444; font-weight: 600; }}
     .projects-status-buttons {{ display: flex; gap: 6px; flex-wrap: wrap; }}
     .tab-btn.status-btn {{ padding: 6px 10px; font-size: 13px; }}
+    .projects-checkbox {{ display: flex; gap: 6px; align-items: center; font-weight: 600; }}
+    .project-last-log {{ color: #444; font-weight: 600; font-size: 12px; }}
     .projects-filters select {{
       padding: 6px 10px;
       border: 1px solid #CCC;
@@ -4358,6 +4792,13 @@ def write_tabbed_html(
       word-break: break-word;
     }}
     .project-info-table td:first-child {{ width: 42%; color: #555; }}
+    .project-timelog {{ margin-top: 10px; }}
+    .project-timelog-title {{ font-weight: 700; margin: 10px 0 6px; }}
+    .project-timelog-table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
+    .project-timelog-table th {{ text-align: left; padding: 6px 6px; color: #555; border-bottom: 1px solid #EEE; }}
+    .project-timelog-table td {{ padding: 6px 6px; border-bottom: 1px solid #F3F3F3; vertical-align: top; word-break: break-word; }}
+    .timelog-date {{ width: 110px; white-space: nowrap; font-variant-numeric: tabular-nums; }}
+    .timelog-duration {{ width: 100px; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }}
     .deliverable-fn {{ font-weight: 700; margin: 8px 0 6px; }}
     .deliverables-text pre {{
       white-space: pre-wrap;
@@ -4399,34 +4840,19 @@ def write_tabbed_html(
       </div>
 
       <div class="tabs">
-        <button class="tab-btn active" id="btn-counts" onclick="showTab('counts')">Counts</button>
-        <button class="tab-btn" id="btn-hours" onclick="showTab('hours')">Hours</button>
-        <button class="tab-btn" id="btn-percentage" onclick="showTab('percentage')">Percentage</button>
-        <button class="tab-btn" id="btn-projects" onclick="showTab('projects')">Projects</button>
+        {tab_buttons_html}
       </div>
     </div>
 
-    <div class="tab-panel active" id="tab-counts">
-      {counts_html}
-    </div>
-    <div class="tab-panel" id="tab-hours">
-      <div class="hours-metrics">{hours_metrics_html}</div>
-      {hours_html}
-    </div>
-    <div class="tab-panel" id="tab-percentage">
-      <div class="hours-metrics">{percentage_metrics_html}</div>
-      {percentage_html}
-    </div>
-    <div class="tab-panel" id="tab-projects">
-      {projects_html}
-    </div>
+    {tab_panels_html}
   </div>
 
   <script>
     var projectsStatusFilter = "";
+    var enabledTabs = {enabled_tabs_norm!r};
 
     function showTab(name) {{
-      ["counts","hours","percentage","projects"].forEach(function(t) {{
+      enabledTabs.forEach(function(t) {{
         document.getElementById("tab-" + t).classList.toggle("active", t === name);
         document.getElementById("btn-" + t).classList.toggle("active", t === name);
       }});
@@ -4457,9 +4883,11 @@ def write_tabbed_html(
       var prio = document.getElementById("filter-priority");
       var mag = document.getElementById("filter-magnitude");
       var prog = document.getElementById("filter-programma");
+      var hasDelivEl = document.getElementById("filter-has-deliverables");
       var prioVal = prio ? (prio.value || "") : "";
       var magVal = mag ? (mag.value || "") : "";
       var progVal = prog ? (prog.value || "") : "";
+      var hasDeliv = hasDelivEl ? !!hasDelivEl.checked : false;
 
       document.querySelectorAll(".project-item").forEach(function(item) {{
         var ok = true;
@@ -4467,6 +4895,7 @@ def write_tabbed_html(
         var p = (item.getAttribute("data-priority") || "");
         var m = (item.getAttribute("data-magnitude") || "");
         var progs = (item.getAttribute("data-programmas") || "");
+        var hd = (item.getAttribute("data-has-deliverables") || "0");
 
         if (projectsStatusFilter) {{
           ok = ok && (s.toLowerCase() === projectsStatusFilter.toLowerCase());
@@ -4480,6 +4909,9 @@ def write_tabbed_html(
         if (progVal) {{
           var tokens = progs.split(",").map(function(x) {{ return x.trim().toLowerCase(); }});
           ok = ok && (tokens.indexOf(progVal.toLowerCase()) >= 0);
+        }}
+        if (hasDeliv) {{
+          ok = ok && (hd === "1");
         }}
         item.style.display = ok ? "" : "none";
       }});
@@ -4498,8 +4930,10 @@ def write_multi_period_tabbed_html(
     out_html_path: str,
     header_context: Dict[str, Any],
     tables_html: str,
+    projects_filters_html: str = "",
+    enabled_tabs: Tuple[str, ...] = ("hours", "percentage", "projects"),
 ) -> None:
-    """UPDATED: adds Projects tab; uses tables_html as Projects content HTML."""
+    """Write a combined multi-period HTML report with configurable tabs."""
     plotly_cdn = _plotly_cdn_src()
     title_text = html.escape(str(header_context.get("title_text", "Project Portfolio Overview")))
     export_date = html.escape(str(header_context.get("export_date", "")))
@@ -4510,7 +4944,16 @@ def write_multi_period_tabbed_html(
     profile_img_html = f"<img class='profile-img' src='{profile_uri}' alt='Profile'/>" if profile_uri else ""
     teamnl_img_html = f"<img class='teamnl-img' src='{teamnl_uri}' alt='TeamNL'/>" if teamnl_uri else ""
 
+    enabled_tabs_norm: List[str] = []
+    for t in enabled_tabs:
+        if t in ("counts", "hours", "percentage", "projects") and t not in enabled_tabs_norm:
+            enabled_tabs_norm.append(t)
+    if not enabled_tabs_norm:
+        enabled_tabs_norm = ["percentage", "projects"]
+    default_tab = enabled_tabs_norm[0]
+
     projects_html = tables_html or ""
+    projects_filters_html = projects_filters_html or ""
 
     month_period_ids = sorted(
         [p for p in period_payloads.keys() if str(p).startswith("monthly-")],
@@ -4663,6 +5106,30 @@ def write_multi_period_tabbed_html(
     hours_panels_html = "\n".join(period_hours_panels_parts)
     percentage_panels_html = "\n".join(period_percentage_panels_parts)
 
+    tab_labels = {"counts": "Counts", "hours": "Hours", "percentage": "Percentage", "projects": "Projects"}
+    tab_buttons_html = "".join(
+        [
+            (
+                f"<button class=\"tab-btn{' active' if t == default_tab else ''}\" "
+                f"id=\"btn-{t}\" onclick=\"showTab('{t}')\">{tab_labels[t]}</button>"
+            )
+            for t in enabled_tabs_norm
+        ]
+    )
+
+    tab_panels: List[str] = []
+    for t in enabled_tabs_norm:
+        panel_css = "tab-panel active" if t == default_tab else "tab-panel"
+        if t == "counts":
+            tab_panels.append(f"<div class=\"{panel_css}\" id=\"tab-counts\">{counts_panels_html}</div>")
+        elif t == "hours":
+            tab_panels.append(f"<div class=\"{panel_css}\" id=\"tab-hours\">{hours_panels_html}</div>")
+        elif t == "percentage":
+            tab_panels.append(f"<div class=\"{panel_css}\" id=\"tab-percentage\">{percentage_panels_html}</div>")
+        elif t == "projects":
+            tab_panels.append(f"<div class=\"{panel_css}\" id=\"tab-projects\">{projects_html}</div>")
+    tab_panels_html = "".join(tab_panels)
+
     html_content = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -4674,7 +5141,7 @@ def write_multi_period_tabbed_html(
     body {{ font-family: "Segoe UI", Tahoma, sans-serif; margin: 0; background: #FAFAFA; color: #111; }}
     .page {{ padding: 24px 28px 40px; }}
     .sticky-header {{ position: sticky; top: 0; z-index: 50; background: #FAFAFA; padding-top: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.08); }}
-    .report-header {{ display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; flex-wrap: wrap; padding: 16px 0 8px; }}
+    .report-header {{ display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; flex-wrap: wrap; padding: 12px 0 4px; }}
     .header-left h1 {{ margin: 0 0 6px 0; font-size: 26px; }}
     .header-left .meta {{ font-size: 14px; color: #444; }}
     .header-right {{ display: flex; gap: 16px; align-items: center; }}
@@ -4682,7 +5149,7 @@ def write_multi_period_tabbed_html(
     .nn-pie-title {{ writing-mode: vertical-rl; transform: rotate(180deg); font-size: 12px; color: #111; white-space: nowrap; }}
     .profile-img {{ width: 120px; height: 120px; object-fit: cover; border-radius: 10px; border: 2px solid #EEE; background: #FFF; }}
     .teamnl-img {{ height: 64px; object-fit: contain; }}
-    .tabs {{ display: flex; gap: 8px; margin: 4px 0 12px; padding-bottom: 12px; flex-wrap: wrap; }}
+    .tabs {{ display: flex; gap: 8px; margin: 2px 0 8px; padding-bottom: 8px; flex-wrap: wrap; }}
     .month-tabs {{ display: none; }}
     .month-tabs.active {{ display: flex; }}
     .tab-btn {{ padding: 8px 16px; border: 1px solid #CCC; border-radius: 6px; background: #FFF; cursor: pointer; font-weight: 600; }}
@@ -4702,6 +5169,72 @@ def write_multi_period_tabbed_html(
     .hours-metrics {{ margin: 6px 0 16px; }}
     .hours-metrics:empty {{ display: none; margin: 0; }}
     .nn-note {{ margin-top: 6px; font-size: 13px; color: #8A3B3B; }}
+    .hours-breakdown {{
+      background: #FFF;
+      border: 1px solid #DDD;
+      border-radius: 10px;
+      padding: 12px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }}
+    details.hours-breakdown summary {{
+      cursor: pointer;
+      font-weight: 700;
+      list-style: none;
+      outline: none;
+    }}
+    details.hours-breakdown summary::-webkit-details-marker {{ display: none; }}
+    details.hours-breakdown summary::before {{ content: "▸"; display: inline-block; width: 1em; color: #01378A; }}
+    details.hours-breakdown[open] summary::before {{ content: "▾"; }}
+    .hours-breakdown-header {{
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+    }}
+    .hours-breakdown h3 {{ margin: 0; font-size: 16px; }}
+    .hours-breakdown-note {{ margin-top: 8px; font-size: 12px; color: #444; }}
+    .hours-breakdown-list {{ display: flex; flex-direction: column; gap: 6px; }}
+    .hours-project {{
+      background: #FFF;
+      border: 1px solid #EEE;
+      border-radius: 8px;
+      padding: 6px 10px;
+    }}
+    .hours-project[open] {{
+      border-color: #CCC;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }}
+    .hours-project summary {{
+      cursor: pointer;
+      font-weight: 600;
+      list-style: none;
+      outline: none;
+    }}
+    .hours-project summary::-webkit-details-marker {{ display: none; }}
+    .hours-project summary::before {{ content: "▸"; display: inline-block; width: 1em; color: #01378A; }}
+    .hours-project[open] summary::before {{ content: "▾"; }}
+    .hours-project-total {{ font-variant-numeric: tabular-nums; }}
+    .hours-project-percent {{ color: #444; font-weight: 600; }}
+    .hours-project-entries {{ margin-top: 8px; padding-left: 1.2em; }}
+    .hours-entry-table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
+    .hours-entry-table th {{ text-align: left; padding: 6px 6px; color: #555; border-bottom: 1px solid #EEE; }}
+    .hours-entry-table td {{ padding: 6px 6px; border-bottom: 1px solid #F3F3F3; vertical-align: top; word-break: break-word; }}
+    .hours-entry-duration {{ width: 110px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }}
+    .hours-entry-percent {{ width: 90px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }}
+    .hours-entry-empty {{ color: #777; font-style: italic; }}
+    .nn-metrics {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px 18px;
+      font-size: 14px;
+      background: #FFF;
+      border: 1px solid #DDD;
+      border-radius: 8px;
+      padding: 10px 12px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }}
 
     /* Projects page styles (same as single report) */
     .projects-controls {{
@@ -4717,6 +5250,8 @@ def write_multi_period_tabbed_html(
     .projects-filter-label {{ font-size: 12px; color: #444; font-weight: 600; }}
     .projects-status-buttons {{ display: flex; gap: 6px; flex-wrap: wrap; }}
     .tab-btn.status-btn {{ padding: 6px 10px; font-size: 13px; }}
+    .projects-checkbox {{ display: flex; gap: 6px; align-items: center; font-weight: 600; }}
+    .project-last-log {{ color: #444; font-weight: 600; font-size: 12px; }}
     .projects-filters select {{ padding: 6px 10px; border: 1px solid #CCC; border-radius: 6px; background: #FFF; font-weight: 600; }}
     .projects-list {{ display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }}
     details.project-item {{ background: #FFF; border: 1px solid #DDD; border-radius: 10px; padding: 8px 10px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }}
@@ -4732,6 +5267,13 @@ def write_multi_period_tabbed_html(
     .project-info-table {{ width: 100%; border-collapse: collapse; font-size: 12px; background: #FFF; }}
     .project-info-table td {{ padding: 4px 6px; border-bottom: 1px solid #EEE; vertical-align: top; word-break: break-word; }}
     .project-info-table td:first-child {{ width: 42%; color: #555; }}
+    .project-timelog {{ margin-top: 10px; }}
+    .project-timelog-title {{ font-weight: 700; margin: 10px 0 6px; }}
+    .project-timelog-table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
+    .project-timelog-table th {{ text-align: left; padding: 6px 6px; color: #555; border-bottom: 1px solid #EEE; }}
+    .project-timelog-table td {{ padding: 6px 6px; border-bottom: 1px solid #F3F3F3; vertical-align: top; word-break: break-word; }}
+    .timelog-date {{ width: 110px; white-space: nowrap; font-variant-numeric: tabular-nums; }}
+    .timelog-duration {{ width: 100px; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }}
     .deliverable-fn {{ font-weight: 700; margin: 8px 0 6px; }}
     .deliverables-text pre {{ white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow: auto; background: #FAFAFA; border: 1px solid #EEE; border-radius: 8px; padding: 8px; margin: 0; font-size: 12px; }}
     .deliverables-images img {{ max-width: 420px; height: auto; border-radius: 8px; border: 1px solid #EEE; background: #FFF; }}
@@ -4755,41 +5297,33 @@ def write_multi_period_tabbed_html(
       </div>
 
       <div class="tabs">
-        <button class="tab-btn active" id="btn-counts" onclick="showTab('counts')">Counts</button>
-        <button class="tab-btn" id="btn-hours" onclick="showTab('hours')">Hours</button>
-        <button class="tab-btn" id="btn-percentage" onclick="showTab('percentage')">Percentage</button>
-        <button class="tab-btn" id="btn-projects" onclick="showTab('projects')">Projects</button>
+        {tab_buttons_html}
       </div>
 
       <div id="period-controls">
-        <div class="tabs">
-          {period_group_buttons_html}
+        <div id="period-controls-inner">
+          <div class="tabs">
+            {period_group_buttons_html}
+          </div>
+          <div class="tabs month-tabs{' active' if default_group == 'monthly' else ''}" id="month-tabs">
+            {month_buttons_html}
+          </div>
         </div>
-        <div class="tabs month-tabs{' active' if default_group == 'monthly' else ''}" id="month-tabs">
-          {month_buttons_html}
+        <div id="projects-controls-top" style="display:none">
+          {projects_filters_html}
         </div>
       </div>
     </div>
 
-    <div class="tab-panel active" id="tab-counts">
-      {counts_panels_html}
-    </div>
-    <div class="tab-panel" id="tab-hours">
-      {hours_panels_html}
-    </div>
-    <div class="tab-panel" id="tab-percentage">
-      {percentage_panels_html}
-    </div>
-    <div class="tab-panel" id="tab-projects">
-      {projects_html}
-    </div>
+    {tab_panels_html}
   </div>
 
-  <script>
-    var currentTab = "counts";
-    var currentPeriodId = "{default_period_id}";
-    var currentMonthlyId = "{default_month_id}";
-    var projectsStatusFilter = "";
+	  <script>
+	    var currentTab = "{default_tab}";
+	    var enabledTabs = {enabled_tabs_norm!r};
+	    var currentPeriodId = "{default_period_id}";
+	    var currentMonthlyId = "{default_month_id}";
+	    var projectsStatusFilter = "";
 
     function showTab(name) {{
       currentTab = name;
@@ -4830,9 +5364,11 @@ def write_multi_period_tabbed_html(
       var prio = document.getElementById("filter-priority");
       var mag = document.getElementById("filter-magnitude");
       var prog = document.getElementById("filter-programma");
+      var hasDelivEl = document.getElementById("filter-has-deliverables");
       var prioVal = prio ? (prio.value || "") : "";
       var magVal = mag ? (mag.value || "") : "";
       var progVal = prog ? (prog.value || "") : "";
+      var hasDeliv = hasDelivEl ? !!hasDelivEl.checked : false;
 
       document.querySelectorAll(".project-item").forEach(function(item) {{
         var ok = true;
@@ -4840,6 +5376,7 @@ def write_multi_period_tabbed_html(
         var p = (item.getAttribute("data-priority") || "");
         var m = (item.getAttribute("data-magnitude") || "");
         var progs = (item.getAttribute("data-programmas") || "");
+        var hd = (item.getAttribute("data-has-deliverables") || "0");
 
         if (projectsStatusFilter) {{
           ok = ok && (s.toLowerCase() === projectsStatusFilter.toLowerCase());
@@ -4854,21 +5391,31 @@ def write_multi_period_tabbed_html(
           var tokens = progs.split(",").map(function(x) {{ return x.trim().toLowerCase(); }});
           ok = ok && (tokens.indexOf(progVal.toLowerCase()) >= 0);
         }}
+        if (hasDeliv) {{
+          ok = ok && (hd === "1");
+        }}
         item.style.display = ok ? "" : "none";
       }});
     }}
 
     function updateView() {{
-      ["counts","hours","percentage","projects"].forEach(function(t) {{
+      enabledTabs.forEach(function(t) {{
         var tab = document.getElementById("tab-" + t);
         var btn = document.getElementById("btn-" + t);
         if (tab) tab.classList.toggle("active", t === currentTab);
         if (btn) btn.classList.toggle("active", t === currentTab);
       }});
 
-      var periodControls = document.getElementById("period-controls");
-      if (periodControls) {{
-        periodControls.style.display = (currentTab === "projects") ? "none" : "";
+      var periodInner = document.getElementById("period-controls-inner");
+      var projectsControlsTop = document.getElementById("projects-controls-top");
+      if (periodInner && projectsControlsTop) {{
+        periodInner.style.display = (currentTab === "projects") ? "none" : "";
+        projectsControlsTop.style.display = (currentTab === "projects") ? "" : "none";
+      }} else {{
+        var periodControls = document.getElementById("period-controls");
+        if (periodControls) {{
+          periodControls.style.display = (currentTab === "projects") ? "none" : "";
+        }}
       }}
 
       if (currentTab !== "projects") {{
@@ -4970,7 +5517,7 @@ def generate_reports(report_type: str, asof_date: date) -> None:
     periods = compute_report_periods(asof_date)
     header_assets = build_header_assets()
 
-    filters_html, projects_list_html = build_projects_page_html(projects_df, project_info_map, deliverables_map)
+    filters_html, projects_list_html = build_projects_page_html(projects_df, time_entries_df, project_info_map, deliverables_map)
     projects_page_html = filters_html + projects_list_html
 
     nn_df, nn_path, nn_status = load_nn_maandelijks_df()
@@ -5120,7 +5667,7 @@ def generate_reports(report_type: str, asof_date: date) -> None:
 
         base_name = "project_report"
         archive_base_name = f"project_report_asof_{asof_date.isoformat()}"
-        html_path = export_multi_period_report(
+        html_path, lite_html_path = export_multi_period_report(
             period_payloads,
             REPORT_DIR,
             REPORTS_ARCHIVE_DIR,
@@ -5128,9 +5675,11 @@ def generate_reports(report_type: str, asof_date: date) -> None:
             archive_base_name,
             export_date,
             header_context,
-            projects_page_html,
+            projects_list_html,
+            projects_filters_html=filters_html,
         )
         print(f"Generated combined report -> {html_path}")
+        print(f"Generated lite report -> {lite_html_path}")
         return
 
     rtype = report_type
@@ -5219,7 +5768,7 @@ def generate_reports(report_type: str, asof_date: date) -> None:
         base_name = f"project_report_weekly_{period_key}"
         archive_base_name = base_name
 
-    html_path, png_path = export_tabbed_report(
+    html_path, png_path, lite_html_path = export_tabbed_report(
         counts_fig,
         hours_fig,
         percentage_fig,
@@ -5237,6 +5786,7 @@ def generate_reports(report_type: str, asof_date: date) -> None:
     )
 
     print(f"Generated {rtype} report: {period_range} -> {html_path}")
+    print(f"Generated lite report -> {lite_html_path}")
     print(f"PNG exported: {png_path}")
 
 
