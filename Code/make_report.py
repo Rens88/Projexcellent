@@ -1453,7 +1453,24 @@ def add_stacked_hours_bars(
     subplot_row: int,
     title: str,
     project_color_map: Dict[str, str],
+    section_title: Optional[str] = None,
 ) -> None:
+    def _add_section_title() -> None:
+        if not section_title:
+            return
+        fig.add_annotation(
+            text=f"<b>{section_title}</b>",
+            x=0,
+            xref="x domain",
+            y=1.26,
+            yref=axis_domain_ref("y", subplot_row),
+            showarrow=False,
+            align="left",
+            font=dict(size=26, color=BASE_BLUE),
+            row=subplot_row,
+            col=1,
+        )
+
     if time_entries_df.empty:
         fig.add_trace(
             go.Bar(x=["(no time_log data found)"], y=[0], hovertemplate="No time entries found.<extra></extra>", showlegend=False),
@@ -1471,6 +1488,7 @@ def add_stacked_hours_bars(
             row=subplot_row,
             col=1,
         )        
+        _add_section_title()
         return
 
     project_hours = (
@@ -1539,6 +1557,7 @@ def add_stacked_hours_bars(
         row=subplot_row,
         col=1,
     )
+    _add_section_title()
 
 def add_trend_started_closed(
     fig: go.Figure,
@@ -2296,10 +2315,12 @@ def build_hours_figure(
         total_rows = 5
         separator_row = 2
         row_heights = [0.235, 0.06, 0.235, 0.235, 0.235]
+        deep_dive_start_row = 3
     else:
         total_rows = 7
         separator_row = 4
         row_heights = [0.1567, 0.1567, 0.1567, 0.06, 0.1567, 0.1567, 0.1567]
+        deep_dive_start_row = 5
     _, project_color_map = build_color_maps(projects_df)
     vertical_spacing = 0.10 if report_type in ("weekly", "biweekly") else 0.09
     fig = make_subplots(
@@ -2325,9 +2346,10 @@ def build_hours_figure(
             projects_df,
             time_entries_df_filtered,
             "programma",
-            3,
+            deep_dive_start_row,
             "Hours per programma (stacked: each project contributes its hours)",
             project_color_map,
+            section_title="Deep-dive",
         )
         add_stacked_hours_bars(
             fig,
@@ -2382,9 +2404,10 @@ def build_hours_figure(
             projects_df,
             time_entries_df_filtered,
             "programma",
-            5,
+            deep_dive_start_row,
             "Hours per programma (stacked: each project contributes its hours)",
             project_color_map,
+            section_title="Deep-dive",
         )
         add_stacked_hours_bars(
             fig,
@@ -2407,18 +2430,18 @@ def build_hours_figure(
 
     apply_axis_style(fig, total_rows)
 
-    fig.add_annotation(
-        text="<b>Deep-dive</b>",
-        x=0,
-        xref=axis_domain_ref("x", separator_row),
-        y=0.5,
-        yref=axis_domain_ref("y", separator_row),
-        showarrow=False,
-        align="left",
-        font=dict(size=22, color=BASE_BLUE),
-        row=separator_row,
-        col=1,
-    )
+    # fig.add_annotation(
+    #     text="<b>Deep-dive</b>",
+    #     x=0,
+    #     xref=axis_domain_ref("x", separator_row),
+    #     y=0.5,
+    #     yref=axis_domain_ref("y", separator_row),
+    #     showarrow=False,
+    #     align="left",
+    #     font=dict(size=22, color=BASE_BLUE),
+    #     row=separator_row,
+    #     col=1,
+    # )
     fig.update_xaxes(visible=False, row=separator_row, col=1)
     fig.update_yaxes(visible=False, row=separator_row, col=1)
 
