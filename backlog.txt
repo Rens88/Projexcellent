@@ -1,4 +1,5 @@
 **FUTURE**
+- Update "maand" protocol so current month is included as well (potentially with a warning stating the month hasnt yet finished)
 
 IETS MET
 - Overlopen of niet: Zit ik aan m'n max of is er ruimte
@@ -11,9 +12,13 @@ IETS MET
 - Make "per theme" plot a word cloud
 
 **IN PROGRESS** 
-- THe "Deep-dive" is now a prefix to one of the plot titles. Remove it as a prefix of that plot title. instead, it should be a header that breaks the page. Just like "Project Portfolio Overview - Rens" isa big header. It should be text to spearate the priority plots and the deep dive plots.
 
 **DONE**
+
+**COMMITTED**
+
+- THe "Deep-dive" is now a prefix to one of the plot titles. Remove it as a prefix of that plot title. instead, it should be a header that breaks the page. Just like "Project Portfolio Overview - Rens" isa big header. It should be text to spearate the priority plots and the deep dive plots.
+
 - Reduce spacing in header of page between "Generated: YYYY-MM-DD" and buttons.
 - Change the order of the plots. 
 -> The counts page and subpages can be removed altogether
@@ -57,8 +62,6 @@ Any other files will not be shown in the project overview dashboard, but can of 
 
 
 
-
-**COMMITTED**
 Each project folder now also contains a folder "Deliverables" containing a readme.txt which contains the following text:
 "In this "Deliverables" folder you can put files that showcase what was delivered for this project.
 Image (.png) and text files (.txt) will be shown in the dashboard.

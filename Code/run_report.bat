@@ -41,6 +41,7 @@ echo =====================================
 echo FINISHED SUCCESSFULLY
 echo Check the Reports folder for:
 echo   project_report.html
+echo   project_report_with_hours.html
 echo =====================================
 goto :end
 
