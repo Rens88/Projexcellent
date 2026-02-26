@@ -17,7 +17,7 @@ What this script does
    aggregates hours per project and per programma/requester.
 6) Creates a single HTML report (Plotly) with:
    - Tabs: Counts / Hours
-   - Period switcher: 1-week / 2-weeks / month / year
+   - Period switcher: 1-day / 1-week / 2-weeks / month / year
    - (Optionally) single-period reports via `--report-type`
 7) Exports:
    - Reports/project_report_with_hours.html (combined; default, includes Hours tab)
@@ -696,6 +696,9 @@ def _last_completed_biweekly(asof_date: date) -> Tuple[date, date, str]:
 
 
 def compute_report_periods(asof_date: date) -> Dict[str, Dict[str, Any]]:
+    daily_start = asof_date
+    daily_end = asof_date
+    day_key = asof_date.isoformat()
     monthly_start = date(asof_date.year, asof_date.month, 1)
     monthly_end = asof_date
     month_key = f"{asof_date.year:04d}-{asof_date.month:02d}"
@@ -705,6 +708,7 @@ def compute_report_periods(asof_date: date) -> Dict[str, Dict[str, Any]]:
     yearly_end = asof_date
     year_key = f"{asof_date.year:04d}"
     return {
+        "daily": dict(label="1-day", start=daily_start, end=daily_end, key=day_key),
         "weekly": dict(label="1-week", start=weekly_start, end=weekly_end, key=week_key),
         "biweekly": dict(label="2-weeks", start=biweekly_start, end=biweekly_end, key=biweek_key),
         "monthly": dict(label="Month (to-date)", start=monthly_start, end=monthly_end, key=month_key),
@@ -743,6 +747,39 @@ def list_completed_month_periods(asof_date: date, time_entries_df: Optional[pd.D
         periods.append(dict(start=ms, end=me, key=key, label=label))
 
     periods.sort(key=lambda p: p["start"], reverse=True)
+    return periods
+
+
+def list_available_day_periods(asof_date: date, time_entries_df: Optional[pd.DataFrame] = None) -> List[Dict[str, Any]]:
+    """
+    Returns day periods (start/end/key/label), newest-first, from available time-entry dates up to `asof_date`.
+
+    If there are no valid entry dates, falls back to a single day period for `asof_date`.
+    """
+    fallback = dict(start=asof_date, end=asof_date, key=asof_date.isoformat(), label=asof_date.strftime("%a %d %b %Y"))
+    if time_entries_df is None or time_entries_df.empty or "date" not in time_entries_df.columns:
+        return [fallback]
+
+    dates = pd.to_datetime(time_entries_df["date"], errors="coerce").dropna()
+    if dates.empty:
+        return [fallback]
+
+    available = dates.dt.normalize()
+    available = available[available <= pd.Timestamp(asof_date)]
+    if available.empty:
+        return [fallback]
+
+    unique_days = sorted({d.date() for d in available}, reverse=True)
+    periods: List[Dict[str, Any]] = []
+    for day_val in unique_days:
+        periods.append(
+            dict(
+                start=day_val,
+                end=day_val,
+                key=day_val.isoformat(),
+                label=day_val.strftime("%a %d %b %Y"),
+            )
+        )
     return periods
 
 
@@ -1710,6 +1747,7 @@ def build_logged_hours_breakdown_html(
     time_entries_df_filtered: pd.DataFrame,
     title: str = "Logged hours (by project)",
     show_percentage: bool = False,
+    include_total_in_note: bool = False,
 ) -> str:
     if time_entries_df_filtered is None or time_entries_df_filtered.empty:
         return (
@@ -1834,7 +1872,12 @@ def build_logged_hours_breakdown_html(
             "</details>"
         )
 
-    note_text = "Percentages are of the total logged time in this period." if show_percentage else "Click a project to expand."
+    if show_percentage:
+        note_text = "Percentages are of the total logged time in this period."
+        if include_total_in_note:
+            note_text += f" Total logged time: {_format_minutes_hhmm(total_period_minutes)}."
+    else:
+        note_text = "Click a project to expand."
     return (
         "<details class='hours-breakdown'>"
         f"<summary>{html.escape(title)}</summary>"
@@ -2886,7 +2929,7 @@ def build_hours_figure(
     period_label: str,
     report_type: str,
 ) -> go.Figure:
-    if report_type in ("weekly", "biweekly"):
+    if report_type in ("daily", "weekly", "biweekly"):
         total_rows = 5
         separator_row = 2
         row_heights = [0.235, 0.06, 0.235, 0.235, 0.235]
@@ -2897,7 +2940,7 @@ def build_hours_figure(
         row_heights = [0.1567, 0.1567, 0.1567, 0.06, 0.1567, 0.1567, 0.1567]
         deep_dive_start_row = 5
     _, project_color_map = build_color_maps(projects_df)
-    vertical_spacing = 0.10 if report_type in ("weekly", "biweekly") else 0.09
+    vertical_spacing = 0.10 if report_type in ("daily", "weekly", "biweekly") else 0.09
     fig = make_subplots(
         rows=total_rows, cols=1, shared_xaxes=False, vertical_spacing=vertical_spacing, row_heights=row_heights
     )
@@ -2907,7 +2950,7 @@ def build_hours_figure(
     if report_type == "yearly":
         display_end = date(period_start.year, 12, 31)
 
-    if report_type in ("weekly", "biweekly"):
+    if report_type in ("daily", "weekly", "biweekly"):
         add_reported_hours_per_project(
             fig,
             projects_df,
@@ -3590,8 +3633,15 @@ def write_multi_period_tabbed_html(
         key=lambda p: str(p)[len("monthly-"):],
         reverse=False,
     )
+    daily_period_ids = sorted(
+        [p for p in period_payloads.keys() if str(p).startswith("daily-")],
+        key=lambda p: str(p)[len("daily-"):],
+        reverse=True,
+    )
 
     period_groups: List[str] = []
+    if daily_period_ids:
+        period_groups.append("daily")
     if "weekly" in period_payloads:
         period_groups.append("weekly")
     if "biweekly" in period_payloads:
@@ -3603,9 +3653,17 @@ def write_multi_period_tabbed_html(
     if not period_groups:
         raise ValueError("No period payloads provided.")
 
-    default_group = period_groups[0]
+    default_group = "weekly" if "weekly" in period_groups else period_groups[0]
+    if default_group == "daily" and not daily_period_ids and "weekly" in period_groups:
+        default_group = "weekly"
+    default_day_id = daily_period_ids[0] if daily_period_ids else ""
     default_month_id = month_period_ids[-1] if month_period_ids else ""
-    default_period_id = default_month_id if default_group == "monthly" else default_group
+    if default_group == "daily":
+        default_period_id = default_day_id
+    elif default_group == "monthly":
+        default_period_id = default_month_id
+    else:
+        default_period_id = default_group
 
     period_group_buttons_html_parts: List[str] = []
     month_buttons_html_parts: List[str] = []
@@ -3618,6 +3676,8 @@ def write_multi_period_tabbed_html(
     nn_sideways_bar_title_html = build_nn_sideways_bar_title_html()
 
     group_labels: Dict[str, str] = {}
+    if daily_period_ids:
+        group_labels["daily"] = "1-day"
     if "weekly" in period_payloads:
         group_labels["weekly"] = html.escape(str(period_payloads["weekly"].get("label", "1-week")))
     if "biweekly" in period_payloads:
@@ -3627,7 +3687,7 @@ def write_multi_period_tabbed_html(
     if "yearly" in period_payloads:
         group_labels["yearly"] = html.escape(str(period_payloads["yearly"].get("label", "Year")))
 
-    for group_key in ("weekly", "biweekly", "monthly", "yearly"):
+    for group_key in ("daily", "weekly", "biweekly", "monthly", "yearly"):
         if group_key not in period_groups:
             continue
         label = group_labels.get(group_key, html.escape(group_key))
@@ -3637,6 +3697,15 @@ def write_multi_period_tabbed_html(
                 f"<button class=\"tab-btn period-btn{' active' if is_default else ''}\" "
                 f"id=\"btn-period-{group_key}\" onclick=\"showPeriodGroup('{group_key}')\">{label}</button>"
             )
+        )
+
+    day_options_html_parts: List[str] = []
+    for day_id in daily_period_ids:
+        payload = period_payloads[day_id]
+        option_label = html.escape(str(payload.get("label", day_id)))
+        selected_attr = " selected" if day_id == default_day_id else ""
+        day_options_html_parts.append(
+            f"<option value=\"{html.escape(day_id)}\"{selected_attr}>{option_label}</option>"
         )
 
     for month_id in month_period_ids:
@@ -3651,6 +3720,7 @@ def write_multi_period_tabbed_html(
         )
 
     period_ids: List[str] = []
+    period_ids.extend(daily_period_ids)
     for key in ("weekly", "biweekly"):
         if key in period_payloads:
             period_ids.append(key)
@@ -3691,10 +3761,18 @@ def write_multi_period_tabbed_html(
                 )
             )
 
+        show_plots = bool(payload.get("show_plots", True))
+        hours_metrics_html = payload.get("hours_metrics_html") or ""
+        percentage_metrics_html = payload.get("percentage_metrics_html") or hours_metrics_html
+        table_only_html = payload.get("table_only_html") or percentage_metrics_html or hours_metrics_html
+
         if "counts" in enabled_tabs_norm:
-            counts_fig = payload["counts_fig"]
-            counts_div_id = f"counts-fig-{period_id}"
-            counts_html = pio.to_html(counts_fig, include_plotlyjs=False, full_html=False, div_id=counts_div_id)
+            if show_plots:
+                counts_fig = payload["counts_fig"]
+                counts_div_id = f"counts-fig-{period_id}"
+                counts_html = pio.to_html(counts_fig, include_plotlyjs=False, full_html=False, div_id=counts_div_id)
+            else:
+                counts_html = f"<div class=\"hours-metrics\">{table_only_html}</div>"
             period_counts_panels_parts.append(
                 (
                     f"<div class=\"period-panel{' active' if is_default else ''}\" "
@@ -3703,10 +3781,12 @@ def write_multi_period_tabbed_html(
             )
 
         if "hours" in enabled_tabs_norm:
-            hours_fig = payload["hours_fig"]
-            hours_div_id = f"hours-fig-{period_id}"
-            hours_html = pio.to_html(hours_fig, include_plotlyjs=False, full_html=False, div_id=hours_div_id)
-            hours_metrics_html = payload.get("hours_metrics_html") or ""
+            if show_plots:
+                hours_fig = payload["hours_fig"]
+                hours_div_id = f"hours-fig-{period_id}"
+                hours_html = pio.to_html(hours_fig, include_plotlyjs=False, full_html=False, div_id=hours_div_id)
+            else:
+                hours_html = ""
             period_hours_panels_parts.append(
                 (
                     f"<div class=\"period-panel{' active' if is_default else ''}\" "
@@ -3718,11 +3798,12 @@ def write_multi_period_tabbed_html(
             )
 
         if "percentage" in enabled_tabs_norm:
-            percentage_fig = payload["percentage_fig"]
-            percentage_div_id = f"percentage-fig-{period_id}"
-            percentage_html = pio.to_html(percentage_fig, include_plotlyjs=False, full_html=False, div_id=percentage_div_id)
-            hours_metrics_html = payload.get("hours_metrics_html") or ""
-            percentage_metrics_html = payload.get("percentage_metrics_html") or hours_metrics_html
+            if show_plots:
+                percentage_fig = payload["percentage_fig"]
+                percentage_div_id = f"percentage-fig-{period_id}"
+                percentage_html = pio.to_html(percentage_fig, include_plotlyjs=False, full_html=False, div_id=percentage_div_id)
+            else:
+                percentage_html = ""
             period_percentage_panels_parts.append(
                 (
                     f"<div class=\"period-panel{' active' if is_default else ''}\" "
@@ -3734,6 +3815,7 @@ def write_multi_period_tabbed_html(
             )
 
     period_group_buttons_html = "\n".join(period_group_buttons_html_parts)
+    day_select_html = "\n".join(day_options_html_parts)
     month_buttons_html = "\n".join(month_buttons_html_parts)
     period_meta_html = "\n".join(period_meta_html_parts)
     period_note_html = "\n".join(period_note_html_parts)
@@ -4405,7 +4487,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate project portfolio reports.")
     parser.add_argument(
         "--report-type",
-        choices=["combined", "yearly", "monthly", "biweekly", "weekly", "all"],
+        choices=["combined", "yearly", "monthly", "biweekly", "weekly", "daily", "all"],
         default="combined",
         help="Report type to generate.",
     )
@@ -4454,6 +4536,39 @@ def generate_reports(report_type: str, asof_date: date) -> None:
 
     if report_type in ("combined", "all"):
         period_payloads: Dict[str, Dict[str, Any]] = {}
+
+        for day_info in list_available_day_periods(asof_date, time_entries_df):
+            period_start = day_info["start"]
+            period_end = day_info["end"]
+            day_key = day_info["key"]
+            period_id = f"daily-{day_key}"
+            period_label = day_info["label"]
+
+            time_entries_filtered = filter_time_entries_by_period(time_entries_df, period_start, period_end)
+
+            nn_note = None
+            if nn_df is None:
+                nn_note = nn_status
+            table_only_html = build_logged_hours_breakdown_html(
+                time_entries_filtered,
+                show_percentage=True,
+                include_total_in_note=True,
+            )
+
+            period_payloads[period_id] = dict(
+                label=period_label,
+                period_range=f"{period_start.isoformat()} to {period_end.isoformat()}",
+                counts_fig=go.Figure(),
+                hours_fig=go.Figure(),
+                percentage_fig=go.Figure(),
+                show_plots=False,
+                table_only_html=table_only_html,
+                hours_metrics_html=table_only_html,
+                percentage_metrics_html=table_only_html,
+                sideways_bar_chart_html="",
+                nn_note=nn_note,
+            )
+
         for rtype in ("weekly", "biweekly", "yearly"):
             period_info = periods[rtype]
             period_start = period_info["start"]
@@ -4485,7 +4600,7 @@ def generate_reports(report_type: str, asof_date: date) -> None:
                 percentage_metrics_html = build_logged_hours_breakdown_html(time_entries_filtered, show_percentage=True)
 
             projects_for_counts = projects_df
-            if rtype in ("weekly", "biweekly"):
+            if rtype in ("weekly", "biweekly", "daily"):
                 projects_for_counts = filter_projects_with_hours(projects_df, time_entries_filtered)
 
             counts_fig = build_counts_figure(
@@ -4647,39 +4762,53 @@ def generate_reports(report_type: str, asof_date: date) -> None:
     if rtype in ("monthly", "yearly"):
         hours_metrics_html = build_nn_metrics_html(nn_summary, nn_note)
         percentage_metrics_html = hours_metrics_html
-    if rtype in ("weekly", "biweekly"):
+    if rtype == "daily":
+        table_only_html = build_logged_hours_breakdown_html(
+            time_entries_filtered,
+            show_percentage=True,
+            include_total_in_note=True,
+        )
+        hours_metrics_html = table_only_html
+        percentage_metrics_html = table_only_html
+    elif rtype in ("weekly", "biweekly"):
         hours_metrics_html = build_logged_hours_breakdown_html(time_entries_filtered)
         percentage_metrics_html = build_logged_hours_breakdown_html(time_entries_filtered, show_percentage=True)
 
     projects_for_counts = projects_df
-    if rtype in ("weekly", "biweekly", "monthly"):
+    if rtype in ("daily", "weekly", "biweekly", "monthly"):
         projects_for_counts = filter_projects_with_hours(projects_df, time_entries_filtered)
 
-    counts_fig = build_counts_figure(
-        projects_for_counts,
-        export_date,
-        period_start,
-        period_end,
-        period_label,
-        project_color_map=project_color_map,
-        timeline_projects_df=projects_df,
-        timeline_year=timeline_year,
-    )
-    hours_fig = build_hours_figure(
-        projects_df,
-        time_entries_filtered,
-        export_date,
-        period_start,
-        period_end,
-        period_label,
-        report_type=rtype,
-    )
-    total_period_hours = (
-        float(pd.to_numeric(time_entries_filtered["duration_hours"], errors="coerce").fillna(0.0).sum())
-        if not time_entries_filtered.empty and "duration_hours" in time_entries_filtered.columns
-        else 0.0
-    )
-    percentage_fig = build_percentage_figure_from_hours(hours_fig, total_period_hours=total_period_hours)
+    if rtype == "daily":
+        counts_fig = go.Figure()
+        hours_fig = go.Figure()
+        percentage_fig = go.Figure()
+        sideways_bar_chart_html = ""
+    else:
+        counts_fig = build_counts_figure(
+            projects_for_counts,
+            export_date,
+            period_start,
+            period_end,
+            period_label,
+            project_color_map=project_color_map,
+            timeline_projects_df=projects_df,
+            timeline_year=timeline_year,
+        )
+        hours_fig = build_hours_figure(
+            projects_df,
+            time_entries_filtered,
+            export_date,
+            period_start,
+            period_end,
+            period_label,
+            report_type=rtype,
+        )
+        total_period_hours = (
+            float(pd.to_numeric(time_entries_filtered["duration_hours"], errors="coerce").fillna(0.0).sum())
+            if not time_entries_filtered.empty and "duration_hours" in time_entries_filtered.columns
+            else 0.0
+        )
+        percentage_fig = build_percentage_figure_from_hours(hours_fig, total_period_hours=total_period_hours)
 
     period_range = f"{period_start.isoformat()} to {period_end.isoformat()}"
     header_context = dict(
@@ -4695,6 +4824,9 @@ def generate_reports(report_type: str, asof_date: date) -> None:
         archive_base_name = f"project_report_yearly_{period_key}"
     elif rtype == "monthly":
         base_name = f"project_report_monthly_{period_key}"
+        archive_base_name = base_name
+    elif rtype == "daily":
+        base_name = f"project_report_daily_{period_key}"
         archive_base_name = base_name
     elif rtype == "biweekly":
         base_name = f"project_report_biweekly_{period_key}"
@@ -5984,8 +6116,15 @@ def write_multi_period_tabbed_html(
         key=lambda p: str(p)[len("monthly-"):],
         reverse=False,
     )
+    daily_period_ids = sorted(
+        [p for p in period_payloads.keys() if str(p).startswith("daily-")],
+        key=lambda p: str(p)[len("daily-"):],
+        reverse=True,
+    )
 
     period_groups: List[str] = []
+    if daily_period_ids:
+        period_groups.append("daily")
     if "weekly" in period_payloads:
         period_groups.append("weekly")
     if "biweekly" in period_payloads:
@@ -5997,9 +6136,17 @@ def write_multi_period_tabbed_html(
     if not period_groups:
         raise ValueError("No period payloads provided.")
 
-    default_group = period_groups[0]
+    default_group = "weekly" if "weekly" in period_groups else period_groups[0]
+    if default_group == "daily" and not daily_period_ids and "weekly" in period_groups:
+        default_group = "weekly"
+    default_day_id = daily_period_ids[0] if daily_period_ids else ""
     default_month_id = month_period_ids[-1] if month_period_ids else ""
-    default_period_id = default_month_id if default_group == "monthly" else default_group
+    if default_group == "daily":
+        default_period_id = default_day_id
+    elif default_group == "monthly":
+        default_period_id = default_month_id
+    else:
+        default_period_id = default_group
 
     period_group_buttons_html_parts: List[str] = []
     month_buttons_html_parts: List[str] = []
@@ -6012,6 +6159,8 @@ def write_multi_period_tabbed_html(
     nn_sideways_bar_title_html = build_nn_sideways_bar_title_html()
 
     group_labels: Dict[str, str] = {}
+    if daily_period_ids:
+        group_labels["daily"] = "1-day"
     if "weekly" in period_payloads:
         group_labels["weekly"] = html.escape(str(period_payloads["weekly"].get("label", "1-week")))
     if "biweekly" in period_payloads:
@@ -6021,7 +6170,7 @@ def write_multi_period_tabbed_html(
     if "yearly" in period_payloads:
         group_labels["yearly"] = html.escape(str(period_payloads["yearly"].get("label", "Year")))
 
-    for group_key in ("weekly", "biweekly", "monthly", "yearly"):
+    for group_key in ("daily", "weekly", "biweekly", "monthly", "yearly"):
         if group_key not in period_groups:
             continue
         label = group_labels.get(group_key, html.escape(group_key))
@@ -6031,6 +6180,15 @@ def write_multi_period_tabbed_html(
                 f"<button class=\"tab-btn period-btn{' active' if is_default else ''}\" "
                 f"id=\"btn-period-{group_key}\" onclick=\"showPeriodGroup('{group_key}')\">{label}</button>"
             )
+        )
+
+    day_options_html_parts: List[str] = []
+    for day_id in daily_period_ids:
+        payload = period_payloads[day_id]
+        option_label = html.escape(str(payload.get("label", day_id)))
+        selected_attr = " selected" if day_id == default_day_id else ""
+        day_options_html_parts.append(
+            f"<option value=\"{html.escape(day_id)}\"{selected_attr}>{option_label}</option>"
         )
 
     for month_id in month_period_ids:
@@ -6045,6 +6203,7 @@ def write_multi_period_tabbed_html(
         )
 
     period_ids: List[str] = []
+    period_ids.extend(daily_period_ids)
     for key in ("weekly", "biweekly"):
         if key in period_payloads:
             period_ids.append(key)
@@ -6085,17 +6244,25 @@ def write_multi_period_tabbed_html(
                 )
             )
 
-        counts_fig = payload["counts_fig"]
-        hours_fig = payload["hours_fig"]
-        percentage_fig = payload["percentage_fig"]
-        counts_div_id = f"counts-fig-{period_id}"
-        hours_div_id = f"hours-fig-{period_id}"
-        percentage_div_id = f"percentage-fig-{period_id}"
-        counts_html = pio.to_html(counts_fig, include_plotlyjs=False, full_html=False, div_id=counts_div_id)
-        hours_html = pio.to_html(hours_fig, include_plotlyjs=False, full_html=False, div_id=hours_div_id)
-        percentage_html = pio.to_html(percentage_fig, include_plotlyjs=False, full_html=False, div_id=percentage_div_id)
+        show_plots = bool(payload.get("show_plots", True))
         hours_metrics_html = payload.get("hours_metrics_html") or ""
         percentage_metrics_html = payload.get("percentage_metrics_html") or hours_metrics_html
+        table_only_html = payload.get("table_only_html") or percentage_metrics_html or hours_metrics_html
+
+        if show_plots:
+            counts_fig = payload["counts_fig"]
+            hours_fig = payload["hours_fig"]
+            percentage_fig = payload["percentage_fig"]
+            counts_div_id = f"counts-fig-{period_id}"
+            hours_div_id = f"hours-fig-{period_id}"
+            percentage_div_id = f"percentage-fig-{period_id}"
+            counts_html = pio.to_html(counts_fig, include_plotlyjs=False, full_html=False, div_id=counts_div_id)
+            hours_html = pio.to_html(hours_fig, include_plotlyjs=False, full_html=False, div_id=hours_div_id)
+            percentage_html = pio.to_html(percentage_fig, include_plotlyjs=False, full_html=False, div_id=percentage_div_id)
+        else:
+            counts_html = f"<div class=\"hours-metrics\">{table_only_html}</div>"
+            hours_html = ""
+            percentage_html = ""
 
         period_counts_panels_parts.append(
             (
@@ -6123,6 +6290,7 @@ def write_multi_period_tabbed_html(
         )
 
     period_group_buttons_html = "\n".join(period_group_buttons_html_parts)
+    day_select_html = "\n".join(day_options_html_parts)
     month_buttons_html = "\n".join(month_buttons_html_parts)
     period_meta_html = "\n".join(period_meta_html_parts)
     period_note_html = "\n".join(period_note_html_parts)
@@ -6239,6 +6407,10 @@ def write_multi_period_tabbed_html(
     .profile-img {{ width: 120px; height: 120px; object-fit: cover; border-radius: 10px; border: 2px solid #EEE; background: #FFF; }}
     .teamnl-img {{ height: 64px; object-fit: contain; }}
     .tabs {{ display: flex; gap: 8px; margin: 2px 0 8px; padding-bottom: 8px; flex-wrap: wrap; }}
+    .day-tabs {{ display: none; align-items: center; gap: 8px; }}
+    .day-tabs.active {{ display: flex; }}
+    .day-tabs label {{ font-size: 13px; color: #444; font-weight: 600; }}
+    .day-tabs select {{ padding: 6px 10px; border: 1px solid #CCC; border-radius: 6px; background: #FFF; font-weight: 600; }}
     .month-tabs {{ display: none; }}
     .month-tabs.active {{ display: flex; }}
     .tab-btn {{ padding: 8px 16px; border: 1px solid #CCC; border-radius: 6px; background: #FFF; cursor: pointer; font-weight: 600; }}
@@ -6428,6 +6600,12 @@ def write_multi_period_tabbed_html(
           <div class="tabs">
             {period_group_buttons_html}
           </div>
+          <div class="tabs day-tabs{' active' if default_group == 'daily' else ''}" id="day-tabs">
+            <label for="day-select">Day</label>
+            <select id="day-select" onchange="showDay(this.value)">
+              {day_select_html}
+            </select>
+          </div>
           <div class="tabs month-tabs{' active' if default_group == 'monthly' else ''}" id="month-tabs">
             {month_buttons_html}
           </div>
@@ -6441,36 +6619,54 @@ def write_multi_period_tabbed_html(
     {tab_panels_html}
   </div>
 
-	  <script>
-	    var currentTab = "{default_tab}";
-	    var enabledTabs = {enabled_tabs_norm!r};
-	    var currentPeriodId = "{default_period_id}";
-	    var currentMonthlyId = "{default_month_id}";
-	    var projectsStatusFilter = "";
-	    var projectsSortKey = "last_updated";
-	    var projectsSortDesc = true;
+		  <script>
+		    var currentTab = "{default_tab}";
+		    var enabledTabs = {enabled_tabs_norm!r};
+		    var currentPeriodId = "{default_period_id}";
+		    var currentDailyId = "{default_day_id}";
+		    var dailyPeriodIds = {daily_period_ids!r};
+		    var currentMonthlyId = "{default_month_id}";
+		    var projectsStatusFilter = "";
+		    var projectsSortKey = "last_updated";
+		    var projectsSortDesc = true;
 
     function showTab(name) {{
       currentTab = name;
       updateView();
     }}
 
-    function showPeriodGroup(group) {{
-      if (group === "monthly") {{
-        if (currentMonthlyId) {{
-          currentPeriodId = currentMonthlyId;
-        }}
-      }} else {{
-        currentPeriodId = group;
-      }}
-      updateView();
-    }}
+	    function showPeriodGroup(group) {{
+	      if (group === "daily") {{
+	        if (!currentDailyId && dailyPeriodIds.length > 0) {{
+	          currentDailyId = dailyPeriodIds[0];
+	        }}
+	        if (currentDailyId) {{
+	          currentPeriodId = currentDailyId;
+	        }}
+	      }} else if (group === "monthly") {{
+	        if (currentMonthlyId) {{
+	          currentPeriodId = currentMonthlyId;
+	        }}
+	      }} else {{
+	        currentPeriodId = group;
+	      }}
+	      updateView();
+	    }}
 
-    function showMonth(monthId) {{
-      currentMonthlyId = monthId;
-      currentPeriodId = monthId;
-      updateView();
-    }}
+	    function showDay(dayId) {{
+	      if (!dayId) {{
+	        return;
+	      }}
+	      currentDailyId = dayId;
+	      currentPeriodId = dayId;
+	      updateView();
+	    }}
+
+	    function showMonth(monthId) {{
+	      currentMonthlyId = monthId;
+	      currentPeriodId = monthId;
+	      updateView();
+	    }}
 
     function setStatusFilter(statusVal) {{
       projectsStatusFilter = statusVal || "";
@@ -6615,22 +6811,35 @@ def write_multi_period_tabbed_html(
         }}
       }}
 
-      if (currentTab !== "projects") {{
-        var isMonthly = currentPeriodId && currentPeriodId.startsWith("monthly-");
-        var activeGroup = isMonthly ? "monthly" : currentPeriodId;
+	      if (currentTab !== "projects") {{
+	        if (currentPeriodId && currentPeriodId.startsWith("daily-")) {{
+	          currentDailyId = currentPeriodId;
+	        }}
+	        var isMonthly = currentPeriodId && currentPeriodId.startsWith("monthly-");
+	        var isDaily = currentPeriodId && currentPeriodId.startsWith("daily-");
+	        var activeGroup = isMonthly ? "monthly" : (isDaily ? "daily" : currentPeriodId);
 
-        document.querySelectorAll(".period-btn").forEach(function(btn) {{
-          btn.classList.remove("active");
-        }});
+	        document.querySelectorAll(".period-btn").forEach(function(btn) {{
+	          btn.classList.remove("active");
+	        }});
         var activeBtn = document.getElementById("btn-period-" + activeGroup);
-        if (activeBtn) {{
-          activeBtn.classList.add("active");
-        }}
+	        if (activeBtn) {{
+	          activeBtn.classList.add("active");
+	        }}
 
-        var monthTabs = document.getElementById("month-tabs");
-        if (monthTabs) {{
-          monthTabs.classList.toggle("active", isMonthly);
-        }}
+	        var dayTabs = document.getElementById("day-tabs");
+	        if (dayTabs) {{
+	          dayTabs.classList.toggle("active", isDaily);
+	        }}
+	        var daySelect = document.getElementById("day-select");
+	        if (daySelect && currentDailyId) {{
+	          daySelect.value = currentDailyId;
+	        }}
+
+	        var monthTabs = document.getElementById("month-tabs");
+	        if (monthTabs) {{
+	          monthTabs.classList.toggle("active", isMonthly);
+	        }}
         document.querySelectorAll(".month-btn").forEach(function(btn) {{
           btn.classList.remove("active");
         }});
@@ -6724,6 +6933,39 @@ def generate_reports(report_type: str, asof_date: date) -> None:
 
     if report_type in ("combined", "all"):
         period_payloads: Dict[str, Dict[str, Any]] = {}
+
+        for day_info in list_available_day_periods(asof_date, time_entries_df):
+            period_start = day_info["start"]
+            period_end = day_info["end"]
+            day_key = day_info["key"]
+            period_id = f"daily-{day_key}"
+            period_label = day_info["label"]
+
+            time_entries_filtered = filter_time_entries_by_period(time_entries_df, period_start, period_end)
+
+            nn_note = None
+            if nn_df is None:
+                nn_note = nn_status
+            table_only_html = build_logged_hours_breakdown_html(
+                time_entries_filtered,
+                show_percentage=True,
+                include_total_in_note=True,
+            )
+
+            period_payloads[period_id] = dict(
+                label=period_label,
+                period_range=f"{period_start.isoformat()} to {period_end.isoformat()}",
+                counts_fig=go.Figure(),
+                hours_fig=go.Figure(),
+                percentage_fig=go.Figure(),
+                show_plots=False,
+                table_only_html=table_only_html,
+                hours_metrics_html=table_only_html,
+                percentage_metrics_html=table_only_html,
+                sideways_bar_chart_html="",
+                nn_note=nn_note,
+            )
+
         for rtype in ("weekly", "biweekly", "yearly"):
             period_info = periods[rtype]
             period_start = period_info["start"]
@@ -6919,39 +7161,53 @@ def generate_reports(report_type: str, asof_date: date) -> None:
     if rtype in ("monthly", "yearly"):
         hours_metrics_html = build_nn_metrics_html(nn_summary, nn_note)
         percentage_metrics_html = hours_metrics_html
-    if rtype in ("weekly", "biweekly"):
+    if rtype == "daily":
+        table_only_html = build_logged_hours_breakdown_html(
+            time_entries_filtered,
+            show_percentage=True,
+            include_total_in_note=True,
+        )
+        hours_metrics_html = table_only_html
+        percentage_metrics_html = table_only_html
+    elif rtype in ("weekly", "biweekly"):
         hours_metrics_html = build_logged_hours_breakdown_html(time_entries_filtered)
         percentage_metrics_html = build_logged_hours_breakdown_html(time_entries_filtered, show_percentage=True)
 
     projects_for_counts = projects_df
-    if rtype in ("weekly", "biweekly", "monthly"):
+    if rtype in ("daily", "weekly", "biweekly", "monthly"):
         projects_for_counts = filter_projects_with_hours(projects_df, time_entries_filtered)
 
-    counts_fig = build_counts_figure(
-        projects_for_counts,
-        export_date,
-        period_start,
-        period_end,
-        period_label,
-        project_color_map=project_color_map,
-        timeline_projects_df=projects_df,
-        timeline_year=timeline_year,
-    )
-    hours_fig = build_hours_figure(
-        projects_df,
-        time_entries_filtered,
-        export_date,
-        period_start,
-        period_end,
-        period_label,
-        report_type=rtype,
-    )
-    total_period_hours = (
-        float(pd.to_numeric(time_entries_filtered["duration_hours"], errors="coerce").fillna(0.0).sum())
-        if not time_entries_filtered.empty and "duration_hours" in time_entries_filtered.columns
-        else 0.0
-    )
-    percentage_fig = build_percentage_figure_from_hours(hours_fig, total_period_hours=total_period_hours)
+    if rtype == "daily":
+        counts_fig = go.Figure()
+        hours_fig = go.Figure()
+        percentage_fig = go.Figure()
+        sideways_bar_chart_html = ""
+    else:
+        counts_fig = build_counts_figure(
+            projects_for_counts,
+            export_date,
+            period_start,
+            period_end,
+            period_label,
+            project_color_map=project_color_map,
+            timeline_projects_df=projects_df,
+            timeline_year=timeline_year,
+        )
+        hours_fig = build_hours_figure(
+            projects_df,
+            time_entries_filtered,
+            export_date,
+            period_start,
+            period_end,
+            period_label,
+            report_type=rtype,
+        )
+        total_period_hours = (
+            float(pd.to_numeric(time_entries_filtered["duration_hours"], errors="coerce").fillna(0.0).sum())
+            if not time_entries_filtered.empty and "duration_hours" in time_entries_filtered.columns
+            else 0.0
+        )
+        percentage_fig = build_percentage_figure_from_hours(hours_fig, total_period_hours=total_period_hours)
 
     period_range = f"{period_start.isoformat()} to {period_end.isoformat()}"
     header_context = dict(
@@ -6967,6 +7223,9 @@ def generate_reports(report_type: str, asof_date: date) -> None:
         archive_base_name = f"project_report_yearly_{period_key}"
     elif rtype == "monthly":
         base_name = f"project_report_monthly_{period_key}"
+        archive_base_name = base_name
+    elif rtype == "daily":
+        base_name = f"project_report_daily_{period_key}"
         archive_base_name = base_name
     elif rtype == "biweekly":
         base_name = f"project_report_biweekly_{period_key}"
