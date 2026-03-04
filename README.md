@@ -29,6 +29,17 @@ macOS/Linux:
 Outputs are written to `Reports/` (or configured `paths.reports_dir`).
 Default report type comes from `runtime.default_report_type` in config.
 
+## Run At Windows Startup (Optional)
+
+To run the report script automatically when you log in on Windows:
+
+1. Press `Windows + R`.
+2. Type `shell:startup` and press Enter.
+3. In the Startup folder that opens, create a shortcut to `make_report.bat` from this repo.
+4. (Optional) Rename the shortcut to something recognizable, for example `Projexcellent Report`.
+
+At next login, Windows will run that shortcut automatically.
+
 ## Assets Folder
 
 Use `assets/` in the repo root for branding images:

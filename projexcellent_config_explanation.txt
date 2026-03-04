@@ -26,7 +26,7 @@ Behavior notes for the hours settings
 - If hours.workable_hours_per_year is set, it overrides workbook-based yearly capacity logic.
 - For weekly percentage plots, denominator source is chosen in this order:
   1) hours.workable_hours_per_week_reference_value
-  2) yearly available hours / 46 (if yearly available is known)
+  2) yearly total hours from the year plan / 46 (if available)
   3) average reported hours per week so far
 
 Per-item explanation

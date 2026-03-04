@@ -63,7 +63,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "year_plan_completed": "#01378A",
         "year_plan_current_billed": "#01378A",
         "year_plan_current_combined": "#01378A",
-        "year_plan_current_expected": "#F4C300",
+        "year_plan_current_expected": "#E1011A",
         "year_plan_expected": "#F4C300",
     },
     "runtime": {

@@ -213,7 +213,7 @@ def _apply_runtime_config(config_path: Optional[str] = None) -> None:
     YEAR_PLAN_COMPLETED_COLOR = _coerce_hex(color_cfg.get("year_plan_completed"), BASE_BLUE)
     YEAR_PLAN_CURRENT_BILLED_COLOR = _coerce_hex(color_cfg.get("year_plan_current_billed"), BASE_BLUE)
     YEAR_PLAN_CURRENT_COMBINED_COLOR = _coerce_hex(color_cfg.get("year_plan_current_combined"), BASE_BLUE)
-    YEAR_PLAN_CURRENT_EXPECTED_COLOR = _coerce_hex(color_cfg.get("year_plan_current_expected"), BASE_YELLOW)
+    YEAR_PLAN_CURRENT_EXPECTED_COLOR = _coerce_hex(color_cfg.get("year_plan_current_expected"), BASE_RED)
     YEAR_PLAN_EXPECTED_COLOR = _coerce_hex(color_cfg.get("year_plan_expected"), BASE_YELLOW)
 
     use_dummy = bool(runtime_cfg.get("use_dummy_projects_when_projects_empty", True))
@@ -262,7 +262,7 @@ TEAMNL_BASE_COLORS = TEAMNL_BASE_COLORS if "TEAMNL_BASE_COLORS" in globals() els
 YEAR_PLAN_COMPLETED_COLOR = YEAR_PLAN_COMPLETED_COLOR if "YEAR_PLAN_COMPLETED_COLOR" in globals() else BASE_BLUE
 YEAR_PLAN_CURRENT_BILLED_COLOR = YEAR_PLAN_CURRENT_BILLED_COLOR if "YEAR_PLAN_CURRENT_BILLED_COLOR" in globals() else BASE_BLUE
 YEAR_PLAN_CURRENT_COMBINED_COLOR = YEAR_PLAN_CURRENT_COMBINED_COLOR if "YEAR_PLAN_CURRENT_COMBINED_COLOR" in globals() else BASE_BLUE
-YEAR_PLAN_CURRENT_EXPECTED_COLOR = YEAR_PLAN_CURRENT_EXPECTED_COLOR if "YEAR_PLAN_CURRENT_EXPECTED_COLOR" in globals() else BASE_YELLOW
+YEAR_PLAN_CURRENT_EXPECTED_COLOR = YEAR_PLAN_CURRENT_EXPECTED_COLOR if "YEAR_PLAN_CURRENT_EXPECTED_COLOR" in globals() else BASE_RED
 YEAR_PLAN_EXPECTED_COLOR = YEAR_PLAN_EXPECTED_COLOR if "YEAR_PLAN_EXPECTED_COLOR" in globals() else BASE_YELLOW
 
 SHADE_STEPS = [0.0, -0.25, 0.25, -0.50, 0.5, 0.75, -0.75]
@@ -2098,7 +2098,7 @@ def add_activitytype_weighted_pie(
             text=f"<b>{title}</b>",
             x=0,
             xref=axis_domain_ref("x", subplot_row),
-            y=1.12,
+            y=1.18,
             yref=axis_domain_ref("y", subplot_row),
             showarrow=False,
             align="left",
@@ -2133,8 +2133,7 @@ def build_project_activitytype_pie_html(project_entries_df: pd.DataFrame) -> str
         legend_rows.append(
             "<div class='project-activitytype-row'>"
             f"<span class='project-activitytype-dot' style='background:{html.escape(color)}'></span>"
-            f"<span class='project-activitytype-label'>{html.escape(label)}</span>"
-            f"<span class='project-activitytype-pct'>{pct:.1f}%</span>"
+            f"<span class='project-activitytype-label'>{html.escape(label)} ({pct:.1f}%)</span>"
             "</div>"
         )
 
@@ -2335,7 +2334,7 @@ def add_stacked_project_count_bars(
         text=f"<b>{title}</b>",
         x=0,
         xref="x domain",
-        y=1.12,
+        y=1.18,
         yref=axis_domain_ref("y", subplot_row),
         showarrow=False,
         align="left",
@@ -2361,11 +2360,13 @@ def add_stacked_hours_bars(
             text=f"<b>{section_title}</b>",
             x=0,
             xref="x domain",
-            y=1.26,
+            y=1.34,
             yref=axis_domain_ref("y", subplot_row),
+            xanchor="left",
+            yanchor="bottom",
             showarrow=False,
             align="left",
-            font=dict(size=26, color=BASE_BLUE),
+            font=dict(size=24, color=BASE_BLUE),
             row=subplot_row,
             col=1,
         )
@@ -2380,8 +2381,10 @@ def add_stacked_hours_bars(
             text=f"<b>{title}</b>",
             x=0,
             xref="x domain",
-            y=1.12,
+            y=1.18,
             yref=axis_domain_ref("y", subplot_row),
+            xanchor="left",
+            yanchor="bottom",
             showarrow=False,
             align="left",
             row=subplot_row,
@@ -2449,8 +2452,10 @@ def add_stacked_hours_bars(
         text=f"<b>{title}</b>",
         x=0,
         xref="x domain",
-        y=1.12,
+        y=1.18,
         yref=axis_domain_ref("y", subplot_row),
+        xanchor="left",
+        yanchor="bottom",
         showarrow=False,
         align="left",
         row=subplot_row,
@@ -2483,7 +2488,7 @@ def add_trend_started_closed(
             text=f"<b>{title}</b> (no weeks found)",
             x=0,
             xref="x domain",
-            y=1.12,
+            y=1.18,
             yref=f"y{subplot_row} domain",
             showarrow=False,
             align="left",
@@ -2504,7 +2509,7 @@ def add_trend_started_closed(
             text=f"<b>{title}</b> (no project dates found)",
             x=0,
             xref="x domain",
-            y=1.12,
+            y=1.18,
             yref=f"y{subplot_row} domain",
             showarrow=False,
             align="left",
@@ -2586,7 +2591,7 @@ def add_trend_started_closed(
         text=f"<b>{title}</b>",
         x=0,
         xref="x domain",
-        y=1.12,
+        y=1.18,
         yref=f"y{subplot_row} domain",
         showarrow=False,
         align="left",
@@ -2627,7 +2632,7 @@ def add_hours_per_week(
             text=f"<b>{title}</b> (no weeks found)",
             x=0,
             xref="x domain",
-            y=1.12,
+            y=1.18,
             yref=f"y{subplot_row} domain",
             showarrow=False,
             align="left",
@@ -2649,7 +2654,7 @@ def add_hours_per_week(
             text=f"<b>{title}</b> (no time entries)",
             x=0,
             xref="x domain",
-            y=1.12,
+            y=1.18,
             yref=f"y{subplot_row} domain",
             showarrow=False,
             align="left",
@@ -2675,7 +2680,7 @@ def add_hours_per_week(
             text=f"<b>{title}</b> (no time entries)",
             x=0,
             xref="x domain",
-            y=1.12,
+            y=1.18,
             yref=f"y{subplot_row} domain",
             showarrow=False,
             align="left",
@@ -2806,7 +2811,7 @@ def add_hours_per_week(
         text=f"<b>{title}</b>",
         x=0,
         xref="x domain",
-        y=1.12,
+        y=1.18,
         yref=f"y{subplot_row} domain",
         showarrow=False,
         align="left",
@@ -2840,7 +2845,7 @@ def add_estimated_magnitude_per_week(
             text=f"<b>{title}</b> (no weeks found)",
             x=0,
             xref="x domain",
-            y=1.12,
+            y=1.18,
             yref=f"y{subplot_row} domain",
             showarrow=False,
             align="left",
@@ -2862,7 +2867,7 @@ def add_estimated_magnitude_per_week(
             text=f"<b>{title}</b> (no project dates found)",
             x=0,
             xref="x domain",
-            y=1.12,
+            y=1.18,
             yref=f"y{subplot_row} domain",
             showarrow=False,
             align="left",
@@ -2960,7 +2965,7 @@ def add_estimated_magnitude_per_week(
         text=f"<b>{title}</b>",
         x=0,
         xref="x domain",
-        y=1.12,
+        y=1.18,
         yref=f"y{subplot_row} domain",
         showarrow=False,
         align="left",
@@ -2988,7 +2993,7 @@ def add_reported_hours_per_project(
             text=f"<b>{title}</b>",
             x=0,
             xref="x domain",
-            y=1.12,
+            y=1.18,
             yref=axis_domain_ref("y", subplot_row),
             showarrow=False,
             align="left",
@@ -3013,7 +3018,7 @@ def add_reported_hours_per_project(
             text=f"<b>{title}</b>",
             x=0,
             xref="x domain",
-            y=1.12,
+            y=1.18,
             yref=axis_domain_ref("y", subplot_row),
             showarrow=False,
             align="left",
@@ -3039,7 +3044,7 @@ def add_reported_hours_per_project(
             text=f"<b>{title}</b>",
             x=0,
             xref="x domain",
-            y=1.12,
+            y=1.18,
             yref=axis_domain_ref("y", subplot_row),
             showarrow=False,
             align="left",
@@ -3092,7 +3097,7 @@ def add_reported_hours_per_project(
         text=f"<b>{title}</b>",
         x=0,
         xref="x domain",
-        y=1.12,
+        y=1.18,
         yref=axis_domain_ref("y", subplot_row),
         showarrow=False,
         align="left",
@@ -3123,7 +3128,7 @@ def add_nn_summary_bars(
             text=f"<b>{title}</b>",
             x=0,
             xref="x domain",
-            y=1.12,
+            y=1.18,
             yref=axis_domain_ref("y", subplot_row),
             showarrow=False,
             align="left",
@@ -3149,7 +3154,7 @@ def add_nn_summary_bars(
         text=f"<b>{title}</b>",
         x=0,
         xref="x domain",
-        y=1.12,
+        y=1.18,
         yref=axis_domain_ref("y", subplot_row),
         showarrow=False,
         align="left",
@@ -3442,7 +3447,7 @@ def compute_weekly_reference_hours(
     """
     Preferred order:
       1) config.hours.workable_hours_per_week_reference_value
-      2) yearly available hours / 46 (when available)
+      2) yearly total hours (nn_total_hours) / 46 (when available)
       3) average reported hours per week so far
     Returns (reference_hours, source_key, title_note_or_none).
     """
@@ -3451,10 +3456,19 @@ def compute_weekly_reference_hours(
         note = f"Percent base: workable_hours_per_week_reference_value = {ref:.1f} h/week"
         return ref, "config_week_reference", note
 
+    yearly_total = _to_float((nn_summary or {}).get("nn_total_hours"))
+    if yearly_total is not None and yearly_total > 0:
+        ref = float(yearly_total / 46.0)
+        note = f"Percent base: yearly total hours / 46 = {yearly_total:.0f}/46 = {ref:.1f} h/week"
+        return ref, "year_total_div_46", note
+
     yearly_available = _to_float((nn_summary or {}).get("year_available_hours"))
     if yearly_available is not None and yearly_available > 0:
         ref = float(yearly_available / 46.0)
-        note = f"Percent base: yearly available hours / 46 = {yearly_available:.0f}/46 = {ref:.1f} h/week"
+        note = (
+            "Percent base: yearly available hours / 46 "
+            f"(fallback) = {yearly_available:.0f}/46 = {ref:.1f} h/week"
+        )
         return ref, "year_capacity_div_46", note
 
     if (
@@ -4390,6 +4404,14 @@ def write_tabbed_html(
         if company_logo_uri
         else ""
     )
+    branding_row_html = ""
+    if company_logo_img_html or profile_img_html:
+        branding_row_html = (
+            "<div class='branding-row'>"
+            f"{company_logo_img_html}"
+            f"{profile_img_html}"
+            "</div>"
+        )
     nn_note_html = f"<div class='nn-note'>{html.escape(nn_note)}</div>" if nn_note else ""
     nn_sideways_bar_title_html = build_nn_sideways_bar_title_html()
     sideways_bar_chart_block_html = (
@@ -4472,7 +4494,11 @@ def write_tabbed_html(
     .header-left h1 {{ margin: 0 0 6px 0; font-size: 26px; }}
     .header-left .subtitle {{ margin: 0 0 6px 0; font-size: 14px; color: #555; font-weight: 600; }}
     .header-left .meta {{ font-size: 14px; color: #444; }}
-    .header-right {{ display: flex; gap: 16px; align-items: center; }}
+    .header-right {{
+      display: flex;
+      justify-content: flex-end;
+      align-items: flex-start;
+    }}
     .nn-sideways-bar-block {{
       display: flex;
       flex-direction: column;
@@ -4548,6 +4574,14 @@ def write_tabbed_html(
       background: #FFF;
     }}
     .company-logo-img {{ height: 64px; object-fit: contain; }}
+    .branding-row {{
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+      padding: 2px 0 10px;
+    }}
     .tabs {{
       display: flex;
       gap: 8px;
@@ -4820,10 +4854,9 @@ def write_tabbed_html(
       box-shadow: inset 0 0 0 1px rgba(255,255,255,0.7);
     }}
     .project-activitytype-legend {{ display: flex; flex-direction: column; gap: 4px; font-size: 12px; }}
-    .project-activitytype-row {{ display: grid; grid-template-columns: 12px 1fr auto; gap: 8px; align-items: center; }}
+    .project-activitytype-row {{ display: grid; grid-template-columns: 12px 1fr; gap: 8px; align-items: center; }}
     .project-activitytype-dot {{ width: 10px; height: 10px; border-radius: 999px; display: inline-block; }}
     .project-activitytype-label {{ color: #333; }}
-    .project-activitytype-pct {{ font-variant-numeric: tabular-nums; color: #555; }}
     .deliverable-fn {{ font-weight: 700; margin: 8px 0 6px; }}
     .deliverables-text pre {{
       white-space: pre-wrap;
@@ -4860,10 +4893,9 @@ def write_tabbed_html(
         </div>
         <div class="header-right">
           {sideways_bar_chart_block_html}
-          {company_logo_img_html}
-          {profile_img_html}
         </div>
       </div>
+      {branding_row_html}
 
       <div class="tabs">
         {tab_buttons_html}
@@ -5048,6 +5080,14 @@ def write_multi_period_tabbed_html(
         if company_logo_uri
         else ""
     )
+    branding_row_html = ""
+    if company_logo_img_html or profile_img_html:
+        branding_row_html = (
+            "<div class='branding-row'>"
+            f"{company_logo_img_html}"
+            f"{profile_img_html}"
+            "</div>"
+        )
 
     enabled_tabs_norm: List[str] = []
     for t in enabled_tabs:
@@ -5287,7 +5327,7 @@ def write_multi_period_tabbed_html(
     .header-left h1 {{ margin: 0 0 6px 0; font-size: 26px; }}
     .header-left .subtitle {{ margin: 0 0 6px 0; font-size: 14px; color: #555; font-weight: 600; }}
     .header-left .meta {{ font-size: 14px; color: #444; }}
-    .header-right {{ display: flex; gap: 16px; align-items: center; }}
+    .header-right {{ display: flex; justify-content: flex-end; align-items: flex-start; }}
     .nn-sideways-bar-block {{
       display: flex;
       flex-direction: column;
@@ -5356,6 +5396,7 @@ def write_multi_period_tabbed_html(
     }}
     .profile-img {{ width: 120px; height: 120px; object-fit: cover; border-radius: 10px; border: 2px solid #EEE; background: #FFF; }}
     .company-logo-img {{ height: 64px; object-fit: contain; }}
+    .branding-row {{ display: flex; justify-content: flex-end; align-items: center; gap: 16px; flex-wrap: wrap; padding: 2px 0 8px; }}
     .tabs {{ display: flex; gap: 8px; margin: 2px 0 8px; padding-bottom: 8px; flex-wrap: wrap; }}
     .day-tabs {{ display: none; align-items: center; gap: 8px; }}
     .day-tabs.active {{ display: flex; }}
@@ -5529,10 +5570,9 @@ def write_multi_period_tabbed_html(
       box-shadow: inset 0 0 0 1px rgba(255,255,255,0.7);
     }}
     .project-activitytype-legend {{ display: flex; flex-direction: column; gap: 4px; font-size: 12px; }}
-    .project-activitytype-row {{ display: grid; grid-template-columns: 12px 1fr auto; gap: 8px; align-items: center; }}
+    .project-activitytype-row {{ display: grid; grid-template-columns: 12px 1fr; gap: 8px; align-items: center; }}
     .project-activitytype-dot {{ width: 10px; height: 10px; border-radius: 999px; display: inline-block; }}
     .project-activitytype-label {{ color: #333; }}
-    .project-activitytype-pct {{ font-variant-numeric: tabular-nums; color: #555; }}
     .deliverable-fn {{ font-weight: 700; margin: 8px 0 6px; }}
     .deliverables-text pre {{ white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow: auto; background: #FAFAFA; border: 1px solid #EEE; border-radius: 8px; padding: 8px; margin: 0; font-size: 12px; }}
     .deliverables-images img {{ max-width: 420px; height: auto; border-radius: 8px; border: 1px solid #EEE; background: #FFF; }}
@@ -5551,10 +5591,9 @@ def write_multi_period_tabbed_html(
         </div>
         <div class="header-right">
           {sideways_bar_chart_blocks_html}
-          {company_logo_img_html}
-          {profile_img_html}
         </div>
       </div>
+      {branding_row_html}
 
       <div class="tabs">
         {tab_buttons_html}
@@ -6155,7 +6194,11 @@ def generate_reports(report_type: str, asof_date: date) -> None:
                 total_period_hours=total_period_hours,
                 weekly_reference_hours=weekly_ref,
                 weekly_reference_note=weekly_ref_note,
-                show_weekly_reference_note_in_title=weekly_ref_source in ("config_week_reference", "year_capacity_div_46"),
+                show_weekly_reference_note_in_title=weekly_ref_source in (
+                    "config_week_reference",
+                    "year_total_div_46",
+                    "year_capacity_div_46",
+                ),
             )
 
             period_payloads[rtype] = dict(
@@ -6234,7 +6277,11 @@ def generate_reports(report_type: str, asof_date: date) -> None:
                 total_period_hours=total_period_hours,
                 weekly_reference_hours=weekly_ref,
                 weekly_reference_note=weekly_ref_note,
-                show_weekly_reference_note_in_title=weekly_ref_source in ("config_week_reference", "year_capacity_div_46"),
+                show_weekly_reference_note_in_title=weekly_ref_source in (
+                    "config_week_reference",
+                    "year_total_div_46",
+                    "year_capacity_div_46",
+                ),
             )
 
             period_payloads[period_id] = dict(
@@ -6363,7 +6410,11 @@ def generate_reports(report_type: str, asof_date: date) -> None:
             total_period_hours=total_period_hours,
             weekly_reference_hours=weekly_ref,
             weekly_reference_note=weekly_ref_note,
-            show_weekly_reference_note_in_title=weekly_ref_source in ("config_week_reference", "year_capacity_div_46"),
+            show_weekly_reference_note_in_title=weekly_ref_source in (
+                "config_week_reference",
+                "year_total_div_46",
+                "year_capacity_div_46",
+            ),
         )
 
     period_range = f"{period_start.isoformat()} to {period_end.isoformat()}"
