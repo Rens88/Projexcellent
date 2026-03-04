@@ -2,14 +2,10 @@
 /Reports
 /Code/.venv
 
-# Ignore everything in Projecten
+# Ignore all real project data by default
 Projecten/*
 
-# But keep these subfolders
-!Projecten/dummy1/
-!Projecten/dummy2/
-
-# And keep their contents
-!Projecten/dummy1/**
-!Projecten/dummy2/**
+# Keep placeholder so the directory exists in git
+!Projecten/.gitkeep
 *.pyc
+__pycache__/

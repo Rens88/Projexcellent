@@ -1,0 +1,24 @@
+{
+  "name": "Projexcellent",
+  "report_title": "Project Portfolio Overview",
+  "paths": {
+    "projects_dir": "Projecten",
+    "dummy_projects_dir": "DummyProjecten",
+    "reports_dir": "Reports",
+    "templates_dir": "Templates",
+    "assets_dir": "Code/.assets",
+    "hours_remaining_excel_paths": [
+      "Data/nn_maandelijks.xlsx",
+      "Data/NN_maandelijks.xlsx"
+    ]
+  },
+  "branding": {
+    "profile_photo": "Code/.assets/profielfotos_nocnsf_square.jpg",
+    "logo": "Code/.assets/teamnl_sport_science_centre_LOGO.png"
+  },
+  "runtime": {
+    "default_report_type": "all",
+    "install_dependencies": true,
+    "use_dummy_projects_when_projects_empty": true
+  }
+}
