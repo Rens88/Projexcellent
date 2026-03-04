@@ -29,6 +29,14 @@ macOS/Linux:
 Outputs are written to `Reports/` (or configured `paths.reports_dir`).
 Default report type comes from `runtime.default_report_type` in config.
 
+## Assets Folder
+
+Use `assets/` in the repo root for branding images:
+- `assets/profile_photo.jpg`
+- `assets/logo.png`
+
+These are the default values in `projexcellent_config.json` and are a good place to store your own replacements.
+
 ## Dummy Demo Mode
 
 `DummyProjecten/` is kept on purpose so users can preview report output before entering real data.
@@ -41,12 +49,19 @@ When `Projecten/` (or `paths.projects_dir`) has no project subfolders and
 
 All runtime settings are in `projexcellent_config.json`, including:
 - report name/title
+- person name (subtitle under title)
+- company name/abbreviation used in report text
 - projects folder location
 - templates folder location
 - reports output location
 - profile photo path
 - logo path
-- optional hours-remaining Excel paths (`paths.hours_remaining_excel_paths`)
+- optional hours-remaining workbook source (`paths.hours_remaining`)
+- optional yearly capacity override (`hours.workable_hours_per_year`)
+- optional weekly percent denominator (`hours.workable_hours_per_week_reference_value`)
+- customizable color scheme (`color_scheme`)
+
+Detailed field-by-field explanation is in `projexcellent_config_explanation.txt`.
 
 No environment variables are required.
 
@@ -81,7 +96,13 @@ macOS/Linux:
 ```
 
 The launcher calls `Code/new_project.py` and uses `projexcellent_config.json`.
+If you run `new_project.bat` or `./new_project.command` without arguments, it now starts an interactive prompt sequence.
 
 ## Notes
 
-- Optional hours-remaining Excel can be omitted; NN summary blocks are skipped when not found.
+- You can provide yearly-capacity data in two ways:
+  - set `hours.workable_hours_per_year` in config (no workbook needed), or
+  - provide a workbook via `paths.hours_remaining`.
+- `paths.hours_remaining.excel_paths` accepts multiple paths so teammates can keep different local file names/locations; the first existing file is used.
+- `paths.hours_remaining.sheet_name` lets you set the workbook sheet explicitly.
+- A starter template is available at `Templates/hours_remaining_template.csv`.

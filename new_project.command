@@ -28,8 +28,39 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
   exit 1
 fi
 
+CMD_ARGS=()
+if [[ "$#" -eq 0 ]]; then
+  echo "No arguments supplied. Enter new project details."
+  read -r -p "Counter (required, e.g. 12): " NP_COUNTER
+  read -r -p "Slug (required, e.g. sleep_study): " NP_SLUG
+  read -r -p "Project name (required): " NP_PROJECT_NAME
+  read -r -p "Year (optional, default=current year): " NP_YEAR
+  read -r -p "Programma (optional, default=Other): " NP_PROGRAMMA
+  read -r -p "Theme (optional, default=General): " NP_THEME
+  read -r -p "Owner (optional): " NP_OWNER
+  read -r -p "Requester (optional, default=Unknown): " NP_REQUESTER
+  read -r -p "Status [Proposed/Active/On-hold/Closed/Cancelled] (optional): " NP_STATUS
+  read -r -p "Priority [Low/Medium/High/Critical] (optional): " NP_PRIORITY
+
+  if [[ -z "$NP_COUNTER" || -z "$NP_SLUG" || -z "$NP_PROJECT_NAME" ]]; then
+    echo "ERROR: Counter, slug, and project name are required."
+    exit 1
+  fi
+
+  CMD_ARGS=(--config "$CONFIG_FILE" --counter "$NP_COUNTER" --slug "$NP_SLUG" --project-name "$NP_PROJECT_NAME")
+  [[ -n "$NP_YEAR" ]] && CMD_ARGS+=(--year "$NP_YEAR")
+  [[ -n "$NP_PROGRAMMA" ]] && CMD_ARGS+=(--programma "$NP_PROGRAMMA")
+  [[ -n "$NP_THEME" ]] && CMD_ARGS+=(--theme "$NP_THEME")
+  [[ -n "$NP_OWNER" ]] && CMD_ARGS+=(--owner "$NP_OWNER")
+  [[ -n "$NP_REQUESTER" ]] && CMD_ARGS+=(--requester "$NP_REQUESTER")
+  [[ -n "$NP_STATUS" ]] && CMD_ARGS+=(--status "$NP_STATUS")
+  [[ -n "$NP_PRIORITY" ]] && CMD_ARGS+=(--priority "$NP_PRIORITY")
+else
+  CMD_ARGS=(--config "$CONFIG_FILE" "$@")
+fi
+
 if [[ -x "$VENV_PY" ]]; then
-  "$VENV_PY" "$RUNNER" --config "$CONFIG_FILE" "$@"
+  "$VENV_PY" "$RUNNER" "${CMD_ARGS[@]}"
   exit 0
 fi
 
@@ -38,4 +69,4 @@ if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
   exit 1
 fi
 
-"$PYTHON_BIN" "$RUNNER" --config "$CONFIG_FILE" "$@"
+"$PYTHON_BIN" "$RUNNER" "${CMD_ARGS[@]}"

@@ -1,20 +1,47 @@
 {
   "name": "Projexcellent",
   "report_title": "Project Portfolio Overview",
+  "person_name": "john doe",
+  "company": {
+    "name": "NOC*NSF",
+    "abbreviation": "NN"
+  },
   "paths": {
     "projects_dir": "Projecten",
     "dummy_projects_dir": "DummyProjecten",
     "reports_dir": "Reports",
     "templates_dir": "Templates",
-    "assets_dir": "Code/.assets",
-    "hours_remaining_excel_paths": [
-      "Data/nn_maandelijks.xlsx",
-      "Data/NN_maandelijks.xlsx"
-    ]
+    "assets_dir": "assets",
+    "hours_remaining": {
+      "excel_paths": [
+        "Data/hours_remaining.xlsx",
+        "Data/nn_maandelijks.xlsx",
+        "Data/NN_maandelijks.xlsx"
+      ],
+      "sheet_name": "NN_maandelijks",
+      "header_row": 2
+    }
   },
   "branding": {
-    "profile_photo": "Code/.assets/profielfotos_nocnsf_square.jpg",
-    "logo": "Code/.assets/teamnl_sport_science_centre_LOGO.png"
+    "profile_photo": "assets/profile_photo.jpg",
+    "logo": "assets/logo.png"
+  },
+  "hours": {
+    "workable_hours_per_year": null,
+    "workable_hours_per_week_reference_value": null
+  },
+  "color_scheme": {
+    "base_blue": "#01378A",
+    "base_red": "#E1011A",
+    "base_orange": "#EA6D08",
+    "base_yellow": "#F4C300",
+    "base_green": "#009F3D",
+    "base_black": "#111111",
+    "year_plan_completed": "#01378A",
+    "year_plan_current_billed": "#01378A",
+    "year_plan_current_combined": "#01378A",
+    "year_plan_current_expected": "#F4C300",
+    "year_plan_expected": "#F4C300"
   },
   "runtime": {
     "default_report_type": "all",

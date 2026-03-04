@@ -1,0 +1,130 @@
+projexcellent_config.json - Detailed Explanation
+
+Overall purpose
+- The config file is the single place where you define how Projexcellent should run.
+- It lets you change report behavior, paths, labels, branding, and chart colors without editing Python code.
+- It is used by:
+  - Code/run_report.py (launcher/orchestration)
+  - Code/make_report.py (report generation)
+  - Code/new_project.py (new project bootstrap)
+- Relative paths are resolved from the folder where projexcellent_config.json lives.
+- If no real projects exist in paths.projects_dir and runtime.use_dummy_projects_when_projects_empty=true, the tool uses paths.dummy_projects_dir as fallback demo data.
+
+How to work with it
+- Keep this file valid JSON:
+  - keys and string values in double quotes
+  - no trailing commas
+  - no inline comments
+- Use this file together with:
+  - README.md (quick usage)
+  - docs/TRANSFER_GUIDE.md (handover context)
+
+Behavior notes for the hours settings
+- You can provide yearly capacity in two ways:
+  1) Preferred simple mode: set hours.workable_hours_per_year
+  2) Workbook mode: configure paths.hours_remaining (excel_paths + sheet_name + header_row)
+- If hours.workable_hours_per_year is set, it overrides workbook-based yearly capacity logic.
+- For weekly percentage plots, denominator source is chosen in this order:
+  1) hours.workable_hours_per_week_reference_value
+  2) yearly available hours / 46 (if yearly available is known)
+  3) average reported hours per week so far
+
+Per-item explanation
+- name
+  Internal label for this setup. Mainly for identification; can stay "Projexcellent".
+
+- report_title
+  Main title shown at the top of the report.
+
+- person_name
+  Subtitle below the report title, representing the person the report is about.
+
+- company.name
+  Full company name used in chart labels, hover text, and explanatory text.
+
+- company.abbreviation
+  Short company label used where space is limited (for example in compact titles).
+
+- paths.projects_dir
+  Folder containing real project folders (format: YYYY_NNNN_description).
+
+- paths.dummy_projects_dir
+  Fallback folder for demo/test projects if projects_dir is empty and dummy fallback is enabled.
+
+- paths.reports_dir
+  Output directory for generated reports.
+
+- paths.templates_dir
+  Folder with templates such as project_info_template.xlsx and time_log_template.xlsx.
+
+- paths.assets_dir
+  Folder for branding images. Recommended place for profile_photo.jpg and logo.png.
+
+- paths.hours_remaining.excel_paths
+  Ordered list of candidate workbook paths for yearly-capacity input.
+  The first existing file is used.
+  This supports teams where local workbook locations differ.
+
+- paths.hours_remaining.sheet_name
+  Worksheet name in the hours-remaining workbook.
+
+- paths.hours_remaining.header_row
+  1-based row number where the workbook headers are located.
+  Example: 2 means row 2 is treated as the header row.
+
+- branding.profile_photo
+  Path to profile photo shown in report headers.
+
+- branding.logo
+  Path to company logo shown in report headers.
+
+- hours.workable_hours_per_year
+  Optional yearly workable-hours capacity (number).
+  If set, this replaces workbook-based capacity and is used for timeline/capacity logic.
+
+- hours.workable_hours_per_week_reference_value
+  Optional explicit weekly reference hours used for percent-based weekly plots.
+  If set, this is preferred as denominator for weekly percentages.
+
+- color_scheme.base_blue
+  Base palette blue used by charts and UI elements.
+
+- color_scheme.base_red
+  Base palette red used by charts and UI elements.
+
+- color_scheme.base_orange
+  Base palette orange used by charts and UI elements.
+
+- color_scheme.base_yellow
+  Base palette yellow used by charts and UI elements.
+
+- color_scheme.base_green
+  Base palette green used by charts and UI elements.
+
+- color_scheme.base_black
+  Base neutral/dark color used by charts and UI elements.
+
+- color_scheme.year_plan_completed
+  Color for completed segments in the sideways yearly plan bar.
+
+- color_scheme.year_plan_current_billed
+  Color for billed-so-far segment of the current month in the yearly plan bar.
+
+- color_scheme.year_plan_current_combined
+  Color for combined billed+expected segment when shown as one block.
+
+- color_scheme.year_plan_current_expected
+  Color for expected-remaining segment in current month.
+
+- color_scheme.year_plan_expected
+  Color for expected segments in future months.
+
+- runtime.default_report_type
+  Default mode when no report type is passed.
+  Typical values: combined, yearly, monthly, biweekly, weekly, daily, all.
+
+- runtime.install_dependencies
+  If true, launcher can install dependencies from Code/requirements.txt before running.
+
+- runtime.use_dummy_projects_when_projects_empty
+  If true, automatically use dummy projects when real project folder is empty.

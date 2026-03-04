@@ -4,6 +4,7 @@
 
 # Ignore all real project data by default
 Projecten/*
+DummyProjecten/*
 
 # Keep placeholder so the directory exists in git
 !Projecten/.gitkeep

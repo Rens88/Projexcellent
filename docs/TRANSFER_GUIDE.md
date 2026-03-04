@@ -12,10 +12,11 @@ The expected touchpoints are:
 ## Current Source Of Truth
 
 - Configuration: `projexcellent_config.json`
+- Config reference: `projexcellent_config_explanation.txt`
 - Report engine: `Code/make_report.py`
 - Launcher: `Code/run_report.py` and root launcher scripts
 - Project bootstrap: `Code/new_project.py` via `new_project.bat` / `new_project.command`
-- Templates: `Templates/project_info_template.xlsx`, `Templates/time_log_template.xlsx`
+- Templates: `Templates/project_info_template.xlsx`, `Templates/time_log_template.xlsx`, `Templates/hours_remaining_template.csv`
 
 ## Mandatory vs Optional Inputs
 
@@ -30,7 +31,12 @@ Conditionally mandatory:
 
 Optional:
 - `time_log.xlsx` (recommended)
-- hours-remaining Excel configured via `paths.hours_remaining_excel_paths`
+- hours-remaining workbook configured via `paths.hours_remaining` (optional)
+- or yearly capacity directly via `hours.workable_hours_per_year` (optional)
+
+Notes:
+- `paths.hours_remaining.excel_paths` can contain multiple candidate files; first existing path is used.
+- `paths.hours_remaining.sheet_name` controls which worksheet is read.
 
 ## Colleague Onboarding Checklist
 
@@ -38,8 +44,9 @@ Optional:
 2. Run launcher:
 - Windows: `make_report.bat`
 - macOS/Linux: `./make_report.command`
-3. Add or create a project folder under configured projects directory.
-4. Re-run launcher and verify outputs in configured reports directory.
+3. Put branding images in `assets/` (recommended): `profile_photo.jpg` and `logo.png`.
+4. Add or create a project folder under configured projects directory.
+5. Re-run launcher and verify outputs in configured reports directory.
 
 If there are no real projects yet, the launcher will use `DummyProjecten/` as demo input
 when `runtime.use_dummy_projects_when_projects_empty=true`.
@@ -48,6 +55,8 @@ when `runtime.use_dummy_projects_when_projects_empty=true`.
 
 The JSON config now contains:
 - report title/name
+- person name subtitle
+- company name + abbreviation
 - default report type
 - dummy fallback toggle and path
 - profile photo path
@@ -55,6 +64,8 @@ The JSON config now contains:
 - projects folder path
 - templates folder path
 - reports folder path
-- optional hours-remaining Excel paths
+- optional hours-remaining workbook settings
+- optional yearly/weekly capacity settings
+- color scheme
 
 No environment variable setup is required.
