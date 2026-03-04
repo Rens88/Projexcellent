@@ -5,17 +5,18 @@ set "ROOT=%~dp0"
 set "CONFIG_FILE=%ROOT%projexcellent_config.json"
 set "RUNNER=%ROOT%Code\new_project.py"
 set "VENV_PY=%ROOT%Code\.venv\Scripts\python.exe"
+set "EXIT_CODE=0"
 
 if not exist "%RUNNER%" (
     echo ERROR: Could not find "%RUNNER%"
-    pause
-    exit /b 1
+    set "EXIT_CODE=1"
+    goto :end
 )
 
 if not exist "%CONFIG_FILE%" (
     echo ERROR: Could not find config file "%CONFIG_FILE%"
-    pause
-    exit /b 1
+    set "EXIT_CODE=1"
+    goto :end
 )
 
 if exist "%VENV_PY%" (
@@ -31,12 +32,24 @@ if exist "%VENV_PY%" (
             set "PYTHON=python"
         ) else (
             echo Python 3 is required but was not found.
-            pause
-            exit /b 1
+            set "EXIT_CODE=1"
+            goto :end
         )
     )
 )
 
-cd /d "%ROOT%" || exit /b 1
+cd /d "%ROOT%"
+if errorlevel 1 (
+    echo ERROR: Could not change directory to "%ROOT%".
+    set "EXIT_CODE=1"
+    goto :end
+)
+
 %PYTHON% "%RUNNER%" --config "%CONFIG_FILE%" %*
-exit /b %errorlevel%
+set "EXIT_CODE=%errorlevel%"
+
+:end
+echo.
+echo Press any key to close...
+pause >nul
+exit /b %EXIT_CODE%

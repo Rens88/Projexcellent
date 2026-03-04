@@ -7,6 +7,17 @@ RUNNER="$ROOT_DIR/Code/new_project.py"
 VENV_PY="$ROOT_DIR/Code/.venv/bin/python"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
+pause_before_exit() {
+  local exit_code=$?
+  trap - EXIT
+  if [[ -t 0 ]]; then
+    echo
+    read -r -p "Press Enter to close..." _ </dev/tty || true
+  fi
+  exit "$exit_code"
+}
+trap pause_before_exit EXIT
+
 if [[ ! -f "$RUNNER" ]]; then
   echo "ERROR: Missing $RUNNER"
   exit 1
