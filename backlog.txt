@@ -1,4 +1,54 @@
+- Nieuwe rapportage methode: WAAROM?
+-> Overzicht uren aan wie/wat besteed
+-> Overzicht lopende projecten (dwingt tot formuleren van "project")
+-> Overzicht deliverables
+
+Tips van Auke: 
+- maak percentage van tijdsschaal intuitiever. 100% is bijvoorbeeld gemiddeld aantal uur dat je per week ergens aan werkt obv hele jaar
+- iets met voorspelling / planning / prios komende tijd
+
+
 **FUTURE**
+execute the tasks below in an efficient order so things don't have to be done twice. Ask me to clarify any unambiguities. Be thorough, time spent on executing tasks is irrelevant.
+
+- Assets: 
+-> Move .assets to root folder and make it not hidden. 
+-> Add instruction to documentation/readme that this is a good place to put the profile picture and the logo.
+-> Update default config to use the sample logo.png and profile_photo.jpg files
+
+- In config file:
+-> add shorted ommented descriptives to explain what the role is of each configurable item
+-> Why multiple hours_remaining_excel_paths? And can sheetname be defined here as well? Should in templates a template of what such a sheet should look like be created?
+-> Instead of letting the user mimic this workflow with additional hour reporting in separate excel sheet for billing, optionally let the user fill out a number of workable hours in the year in the config file and use that number for the timeline and all other instances where it is used now. The one thing that is not possible is tuning analysis to actually remaining workable hours, so for those instances just spread the remaining workable hours over the workdays remaining.
+-> Also add input for color scheme (and update code so it actually uses user-defined color scheme)
+
+- In the NN Year Plan sideways stacked bar chart: why are there different shades of orange and blue? If it has no meaning, remove the color variation and just show the same shade of blue and the same shade of yellow.
+- The Reported time spent per project plots should be scaled from 0 to 20% above the largest percentage in the plot, rather than from 0 to 100. Same for the deep dive plots (hours per programma, theme, requester)
+- The reported time per week plot should compute percentages based on one of the following, in preferred order:
+	1 -> (preferred option, if available) the new optional user parameter (workable_hours_per_week_reference_value)
+	2 -> (if available) the total number of hours available in the year divided by 46 (a rough estimate of work weeks in a year)
+	3 -> the average number of hours reported per week so far
+	If option 1 or 2 is visualized
+	In the plot title, report what percentages represent
+-> The same should be applied to the estimated magnitude per week plot
+- To the deep-dive plots, add a plot that shows "ActivityType*" from the time log sheets. Make it a pie chart. Let it show the weighted percentages, where weighting takes place on how many hours were spent on it. On the projects page add a similar plot per project showing the weighted ActivityType*
+
+- Lookup all hard-coded references to NOC*NSF or its abbreviation NN or any other potential mentions:
+-> Add "Company name" and "Company abbreviation" to config file
+-> Update all uses of company name and abbreviation to use the configured value in config file
+- Add "person_name" to config file where the name can be defined of the person who the report is about. Use it to appear as a subtitle below the title in the report. By default it should be john doe
+
+- Update the new_project.bat/.command functionality so it initiates as squence where user is requested for input. It now returns an error:
+usage: new_project.py [-h] [--year YEAR] --counter COUNTER --slug SLUG --project-name PROJECT_NAME
+                      [--programma PROGRAMMA] [--theme THEME] [--owner OWNER] [--requester REQUESTER]
+                      [--status {Proposed,Active,On-hold,Closed,Cancelled}] [--priority {Low,Medium,High,Critical}]
+                      [--force] [--config CONFIG]
+new_project.py: error: the following arguments are required: --counter, --slug, --project-name
+
+- Expand DummyProjecten with 5 more projects and make up some hours in the time_log with some made up content up until today so the dummy data is better filled. In fact, write a function that fills the time_logs in dummy up until today with 32 hours per week. Let this function be called when dummyprojecten are used to generate the report (because the user didn't add its own project folder yet).
+
+
+
 
 IETS MET
 - Overlopen of niet: Zit ik aan m'n max of is er ruimte

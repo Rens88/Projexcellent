@@ -1,0 +1,9 @@
+1. Kickoff completed: goals, constraints, and stakeholders aligned.
+2. Data intake milestone: source inventory complete and access validated.
+3. First prototype delivered and reviewed with requester.
+4. Quality checkpoint: assumptions validated and key risks documented.
+5. Handover package finalized with notes for future maintenance.
+
+Current focus:
+- Validate project boundaries and keep deliverables grouped in this folder.
+- Keep time tracking rough if needed (for recency and workload insight).
