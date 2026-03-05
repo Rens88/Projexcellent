@@ -1,6 +1,7 @@
 /DE DAG.txt
 /Reports
 /Code/.venv
+/Code/.venv-win
 
 # Ignore all real project data by default
 Projecten/*
