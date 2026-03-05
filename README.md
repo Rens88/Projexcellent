@@ -117,3 +117,18 @@ If you run `new_project.bat` or `./new_project.command` without arguments, it no
 - `paths.hours_remaining.excel_paths` accepts multiple paths so teammates can keep different local file names/locations; the first existing file is used.
 - `paths.hours_remaining.sheet_name` lets you set the workbook sheet explicitly.
 - A starter template is available at `Templates/hours_remaining_template.csv`.
+
+## Special Project Role: Complete Missing Hours
+
+Use this when you need to log hours on specific dates but cannot confidently map those hours to a real project yet.
+
+How to enable:
+- In that project’s `project_info.xlsx` (sheet `ProjectInfo`), add key `project_role` with value `complete_missing_hours`.
+- Backward-compatible default is built in: folder/project name `2026_0000_Complete_Missing_Hours` is auto-detected as this role.
+
+Behavior:
+- Included in timeline and computed-metric calculations (so total workload stays realistic).
+- Excluded from:
+  - `Billed hours per project`
+  - all deep-dive plots
+  - projects overview outputs (HTML Projects tab and `projects_overview.csv`)

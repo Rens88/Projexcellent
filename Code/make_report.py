@@ -44,7 +44,7 @@ import sys
 import warnings
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -87,6 +87,16 @@ WORKABLE_HOURS_PER_YEAR_OVERRIDE: Optional[float] = None
 WORKABLE_HOURS_PER_WEEK_REFERENCE_VALUE: Optional[float] = None
 USING_DUMMY_FALLBACK = False
 REPORT_TYPE_CHOICES = ["combined", "yearly", "monthly", "biweekly", "weekly", "daily", "all"]
+PROJECT_ROLE_STANDARD = "standard"
+PROJECT_ROLE_COMPLETE_MISSING_HOURS = "complete_missing_hours"
+DEFAULT_COMPLETE_MISSING_HOURS_FOLDER = "2026_0000_complete_missing_hours"
+PROJECT_ROLE_KEY_TOKENS = ("projectrole", "reportingrole", "specialrole", "role")
+COMPLETE_MISSING_HOURS_ROLE_TOKENS = (
+    "completemissinghours",
+    "completemissinghour",
+    "missinghours",
+    "missinghour",
+)
 
 def has_subfolders(path: str) -> bool:
     if not os.path.isdir(path):
@@ -457,6 +467,48 @@ def parse_date(value: Any) -> Optional[pd.Timestamp]:
     if pd.isna(ts):
         return None
     return ts
+
+
+def _normalize_role_token(value: Any) -> str:
+    if value is None:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "", str(value).strip().casefold())
+
+
+def _canonical_project_role(raw_role: Any) -> str:
+    role_token = _normalize_role_token(raw_role)
+    if role_token in COMPLETE_MISSING_HOURS_ROLE_TOKENS:
+        return PROJECT_ROLE_COMPLETE_MISSING_HOURS
+    return PROJECT_ROLE_STANDARD
+
+
+def resolve_project_reporting_role(info: Dict[str, Any], folder_name: str) -> str:
+    normalized_info: Dict[str, Any] = {}
+    for key, value in info.items():
+        key_token = _normalize_role_token(key)
+        if key_token and key_token not in normalized_info:
+            normalized_info[key_token] = value
+
+    explicit_role_found = False
+    for key_token in PROJECT_ROLE_KEY_TOKENS:
+        if key_token in normalized_info:
+            explicit_role_found = True
+            explicit_role = _canonical_project_role(normalized_info.get(key_token))
+            if explicit_role != PROJECT_ROLE_STANDARD:
+                return explicit_role
+
+    folder_token = _normalize_role_token(folder_name)
+    project_name_token = _normalize_role_token(info.get("project_name"))
+    if (
+        folder_token == _normalize_role_token(DEFAULT_COMPLETE_MISSING_HOURS_FOLDER)
+        or project_name_token == _normalize_role_token(DEFAULT_COMPLETE_MISSING_HOURS_FOLDER)
+    ):
+        return PROJECT_ROLE_COMPLETE_MISSING_HOURS
+
+    if explicit_role_found:
+        return PROJECT_ROLE_STANDARD
+
+    return PROJECT_ROLE_STANDARD
 
 
 
@@ -856,6 +908,46 @@ def filter_projects_with_hours(
         return projects_df.iloc[0:0].copy()
     mask = projects_df["project_id"].astype(str).isin(valid_ids)
     return projects_df.loc[mask].copy()
+
+
+def collect_project_ids_by_role(projects_df: pd.DataFrame, role: str) -> Set[str]:
+    if (
+        projects_df is None
+        or projects_df.empty
+        or "project_id" not in projects_df.columns
+        or "__reporting_role" not in projects_df.columns
+    ):
+        return set()
+    role_token = str(role).strip().casefold()
+    matches = projects_df.loc[
+        projects_df["__reporting_role"].fillna("").astype(str).str.strip().str.casefold() == role_token,
+        "project_id",
+    ]
+    return {str(pid).strip() for pid in matches if str(pid).strip()}
+
+
+def filter_projects_excluding_project_ids(
+    projects_df: pd.DataFrame, excluded_project_ids: Optional[Set[str]]
+) -> pd.DataFrame:
+    if projects_df is None:
+        return pd.DataFrame()
+    excluded = {str(pid).strip() for pid in (excluded_project_ids or set()) if str(pid).strip()}
+    if not excluded or "project_id" not in projects_df.columns:
+        return projects_df.copy()
+    mask = ~projects_df["project_id"].astype(str).str.strip().isin(excluded)
+    return projects_df.loc[mask].copy()
+
+
+def filter_time_entries_excluding_project_ids(
+    time_entries_df: pd.DataFrame, excluded_project_ids: Optional[Set[str]]
+) -> pd.DataFrame:
+    if time_entries_df is None:
+        return pd.DataFrame()
+    excluded = {str(pid).strip() for pid in (excluded_project_ids or set()) if str(pid).strip()}
+    if not excluded or "project_id" not in time_entries_df.columns:
+        return time_entries_df.copy()
+    mask = ~time_entries_df["project_id"].astype(str).str.strip().isin(excluded)
+    return time_entries_df.loc[mask].copy()
 
 
 def build_year_week_grid(target_year: int) -> Tuple[pd.DatetimeIndex, pd.DatetimeIndex, pd.DatetimeIndex, float]:
@@ -3274,6 +3366,7 @@ def build_hours_figure(
     period_end: date,
     period_label: str,
     report_type: str,
+    exclude_project_ids: Optional[Set[str]] = None,
 ) -> go.Figure:
     if report_type in ("daily", "weekly", "biweekly"):
         total_rows = 6
@@ -3288,6 +3381,11 @@ def build_hours_figure(
         deep_dive_start_row = 5
         activitytype_row = 8
     _, project_color_map = build_color_maps(projects_df)
+    projects_df_for_breakdown = filter_projects_excluding_project_ids(projects_df, exclude_project_ids)
+    time_entries_df_for_breakdown = filter_time_entries_excluding_project_ids(
+        time_entries_df_filtered,
+        exclude_project_ids,
+    )
     vertical_spacing = 0.10 if report_type in ("daily", "weekly", "biweekly") else 0.09
     specs = [[{"type": "xy"}] for _ in range(total_rows)]
     specs[activitytype_row - 1] = [{"type": "domain"}]
@@ -3308,16 +3406,16 @@ def build_hours_figure(
     if report_type in ("daily", "weekly", "biweekly"):
         add_reported_hours_per_project(
             fig,
-            projects_df,
-            time_entries_df_filtered,
+            projects_df_for_breakdown,
+            time_entries_df_for_breakdown,
             1,
             "Billed hours per project",
             project_color_map,
         )
         add_stacked_hours_bars(
             fig,
-            projects_df,
-            time_entries_df_filtered,
+            projects_df_for_breakdown,
+            time_entries_df_for_breakdown,
             "programma",
             deep_dive_start_row,
             "Hours per programma (stacked: each project contributes its hours)",
@@ -3326,8 +3424,8 @@ def build_hours_figure(
         )
         add_stacked_hours_bars(
             fig,
-            projects_df,
-            time_entries_df_filtered,
+            projects_df_for_breakdown,
+            time_entries_df_for_breakdown,
             "theme",
             4,
             "Hours per theme (stacked: each project contributes its hours)",
@@ -3335,8 +3433,8 @@ def build_hours_figure(
         )
         add_stacked_hours_bars(
             fig,
-            projects_df,
-            time_entries_df_filtered,
+            projects_df_for_breakdown,
+            time_entries_df_for_breakdown,
             "requester",
             5,
             "Hours per requester (stacked: each project contributes its hours)",
@@ -3344,15 +3442,15 @@ def build_hours_figure(
         )
         add_activitytype_weighted_pie(
             fig,
-            time_entries_df_filtered,
+            time_entries_df_for_breakdown,
             activitytype_row,
             "ActivityType* share (weighted by hours)",
         )
     else:
         add_reported_hours_per_project(
             fig,
-            projects_df,
-            time_entries_df_filtered,
+            projects_df_for_breakdown,
+            time_entries_df_for_breakdown,
             1,
             "Billed hours per project",
             project_color_map,
@@ -3380,8 +3478,8 @@ def build_hours_figure(
         )
         add_stacked_hours_bars(
             fig,
-            projects_df,
-            time_entries_df_filtered,
+            projects_df_for_breakdown,
+            time_entries_df_for_breakdown,
             "programma",
             deep_dive_start_row,
             "Hours per programma (stacked: each project contributes its hours)",
@@ -3390,8 +3488,8 @@ def build_hours_figure(
         )
         add_stacked_hours_bars(
             fig,
-            projects_df,
-            time_entries_df_filtered,
+            projects_df_for_breakdown,
+            time_entries_df_for_breakdown,
             "theme",
             6,
             "Hours per theme (stacked: each project contributes its hours)",
@@ -3399,8 +3497,8 @@ def build_hours_figure(
         )
         add_stacked_hours_bars(
             fig,
-            projects_df,
-            time_entries_df_filtered,
+            projects_df_for_breakdown,
+            time_entries_df_for_breakdown,
             "requester",
             7,
             "Hours per requester (stacked: each project contributes its hours)",
@@ -3408,7 +3506,7 @@ def build_hours_figure(
         )
         add_activitytype_weighted_pie(
             fig,
-            time_entries_df_filtered,
+            time_entries_df_for_breakdown,
             activitytype_row,
             "ActivityType* share (weighted by hours)",
         )
@@ -3460,8 +3558,14 @@ def build_hours_section_figures(
     period_start: date,
     period_end: date,
     report_type: str,
+    exclude_project_ids: Optional[Set[str]] = None,
 ) -> Dict[str, go.Figure]:
     _, project_color_map = build_color_maps(projects_df)
+    projects_df_for_breakdown = filter_projects_excluding_project_ids(projects_df, exclude_project_ids)
+    time_entries_df_for_breakdown = filter_time_entries_excluding_project_ids(
+        time_entries_df_filtered,
+        exclude_project_ids,
+    )
     display_start = period_start
     display_end = period_end
     if report_type == "yearly":
@@ -3472,8 +3576,8 @@ def build_hours_section_figures(
     primary_fig = make_subplots(rows=1, cols=1, shared_xaxes=False)
     add_reported_hours_per_project(
         primary_fig,
-        projects_df,
-        time_entries_df_filtered,
+        projects_df_for_breakdown,
+        time_entries_df_for_breakdown,
         1,
         "Billed hours per project",
         project_color_map,
@@ -3519,8 +3623,8 @@ def build_hours_section_figures(
     )
     add_stacked_hours_bars(
         deep_dive_fig,
-        projects_df,
-        time_entries_df_filtered,
+        projects_df_for_breakdown,
+        time_entries_df_for_breakdown,
         "programma",
         1,
         "Hours per programma (stacked: each project contributes its hours)",
@@ -3529,8 +3633,8 @@ def build_hours_section_figures(
     )
     add_stacked_hours_bars(
         deep_dive_fig,
-        projects_df,
-        time_entries_df_filtered,
+        projects_df_for_breakdown,
+        time_entries_df_for_breakdown,
         "theme",
         2,
         "Hours per theme (stacked: each project contributes its hours)",
@@ -3538,8 +3642,8 @@ def build_hours_section_figures(
     )
     add_stacked_hours_bars(
         deep_dive_fig,
-        projects_df,
-        time_entries_df_filtered,
+        projects_df_for_breakdown,
+        time_entries_df_for_breakdown,
         "requester",
         3,
         "Hours per requester (stacked: each project contributes its hours)",
@@ -3547,7 +3651,7 @@ def build_hours_section_figures(
     )
     add_activitytype_weighted_pie(
         deep_dive_fig,
-        time_entries_df_filtered,
+        time_entries_df_for_breakdown,
         4,
         "ActivityType* share (weighted by hours)",
     )
@@ -4513,6 +4617,7 @@ def load_and_validate_projects(projecten_dir: str) -> Tuple[pd.DataFrame, pd.Dat
         project_row["__folder_name"] = folder_name
         project_row["__project_folder"] = os.path.relpath(folder_path, SCRIPT_DIR)
         project_row["__project_info_file"] = os.path.relpath(project_info_path, SCRIPT_DIR)
+        project_row["__reporting_role"] = resolve_project_reporting_role(info, folder_name)
 
         project_row["start_date"] = parse_date(info.get("start_date"))
         project_row["target_end_date"] = parse_date(info.get("target_end_date"))
@@ -7019,16 +7124,44 @@ def generate_reports(report_type: str, asof_date: date) -> None:
     if projects_df.empty:
         raise SystemExit(f"No project folders found under: {PROJECTEN_DIR}")
 
+    complete_missing_hours_project_ids = collect_project_ids_by_role(
+        projects_df,
+        PROJECT_ROLE_COMPLETE_MISSING_HOURS,
+    )
+    projects_overview_df = filter_projects_excluding_project_ids(
+        projects_df,
+        complete_missing_hours_project_ids,
+    )
+    time_entries_for_overview = filter_time_entries_excluding_project_ids(
+        time_entries_df,
+        complete_missing_hours_project_ids,
+    )
+    project_info_map_for_overview = {
+        pid: info
+        for pid, info in project_info_map.items()
+        if str(pid).strip() not in complete_missing_hours_project_ids
+    }
+    deliverables_map_for_overview = {
+        pid: payload
+        for pid, payload in deliverables_map.items()
+        if str(pid).strip() not in complete_missing_hours_project_ids
+    }
+
     os.makedirs(REPORT_DIR, exist_ok=True)
     os.makedirs(REPORTS_ARCHIVE_DIR, exist_ok=True)
 
-    projects_df.to_csv(os.path.join(REPORT_DIR, "projects_overview.csv"), index=False)
+    projects_overview_df.to_csv(os.path.join(REPORT_DIR, "projects_overview.csv"), index=False)
     time_entries_df.to_csv(os.path.join(REPORT_DIR, "time_entries_df.csv"), index=False)
 
     periods = compute_report_periods(asof_date)
     header_assets = build_header_assets()
 
-    filters_html, projects_list_html = build_projects_page_html(projects_df, time_entries_df, project_info_map, deliverables_map)
+    filters_html, projects_list_html = build_projects_page_html(
+        projects_overview_df,
+        time_entries_for_overview,
+        project_info_map_for_overview,
+        deliverables_map_for_overview,
+    )
     projects_page_html = filters_html + projects_list_html
 
     nn_df, nn_path, nn_status = load_nn_maandelijks_df(asof_date=asof_date, all_time_entries_df=time_entries_df)
@@ -7132,6 +7265,7 @@ def generate_reports(report_type: str, asof_date: date) -> None:
                 period_end,
                 period_label,
                 report_type=rtype,
+                exclude_project_ids=complete_missing_hours_project_ids,
             )
             total_period_hours = (
                 float(pd.to_numeric(time_entries_filtered["duration_hours"], errors="coerce").fillna(0.0).sum())
@@ -7169,6 +7303,7 @@ def generate_reports(report_type: str, asof_date: date) -> None:
                     period_start,
                     period_end,
                     rtype,
+                    exclude_project_ids=complete_missing_hours_project_ids,
                 ),
                 total_period_hours=total_period_hours,
                 weekly_reference_hours=weekly_ref,
@@ -7241,6 +7376,7 @@ def generate_reports(report_type: str, asof_date: date) -> None:
                 period_end,
                 period_label,
                 report_type="monthly",
+                exclude_project_ids=complete_missing_hours_project_ids,
             )
             total_period_hours = (
                 float(pd.to_numeric(time_entries_filtered["duration_hours"], errors="coerce").fillna(0.0).sum())
@@ -7275,6 +7411,7 @@ def generate_reports(report_type: str, asof_date: date) -> None:
                     period_start,
                     period_end,
                     "monthly",
+                    exclude_project_ids=complete_missing_hours_project_ids,
                 ),
                 total_period_hours=total_period_hours,
                 weekly_reference_hours=weekly_ref,
@@ -7402,6 +7539,7 @@ def generate_reports(report_type: str, asof_date: date) -> None:
             period_end,
             period_label,
             report_type=rtype,
+            exclude_project_ids=complete_missing_hours_project_ids,
         )
         total_period_hours = (
             float(pd.to_numeric(time_entries_filtered["duration_hours"], errors="coerce").fillna(0.0).sum())
@@ -7450,6 +7588,7 @@ def generate_reports(report_type: str, asof_date: date) -> None:
                 period_start,
                 period_end,
                 rtype,
+                exclude_project_ids=complete_missing_hours_project_ids,
             ),
             total_period_hours=total_period_hours,
             weekly_reference_hours=weekly_ref,

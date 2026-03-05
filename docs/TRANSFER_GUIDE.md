@@ -33,6 +33,7 @@ Optional:
 - `time_log.xlsx` (recommended)
 - hours-remaining workbook configured via `paths.hours_remaining` (optional)
 - or yearly capacity directly via `hours.workable_hours_per_year` (optional)
+- special `project_role=complete_missing_hours` in `project_info.xlsx` for "unknown-but-worked" hours
 
 Notes:
 - `paths.hours_remaining.excel_paths` can contain multiple candidate files; first existing path is used.
@@ -69,3 +70,16 @@ The JSON config now contains:
 - color scheme
 
 No environment variable setup is required.
+
+## Special Role: `complete_missing_hours`
+
+Purpose:
+- Track hours on dates where work happened but exact project attribution is still unclear.
+
+How:
+- Add `project_role` = `complete_missing_hours` in `project_info.xlsx` (sheet `ProjectInfo`).
+- Legacy/default convenience: `2026_0000_Complete_Missing_Hours` is auto-classified as this role.
+
+Reporting behavior:
+- Included in timeline and computed metrics.
+- Excluded from billed-hours-per-project, deep-dive plots, and projects overview outputs.
