@@ -4,7 +4,8 @@ setlocal EnableExtensions EnableDelayedExpansion
 set "ROOT=%~dp0"
 set "CONFIG_FILE=%ROOT%projexcellent_config.json"
 set "RUNNER=%ROOT%Code\new_project.py"
-set "VENV_PY=%ROOT%Code\.venv\Scripts\python.exe"
+set "VENV_PY_WIN=%ROOT%Code\.venv-win\Scripts\python.exe"
+set "VENV_PY_LEGACY=%ROOT%Code\.venv\Scripts\python.exe"
 set "EXIT_CODE=0"
 
 if not exist "%RUNNER%" (
@@ -19,8 +20,10 @@ if not exist "%CONFIG_FILE%" (
     goto :end
 )
 
-if exist "%VENV_PY%" (
-    set "PYTHON=%VENV_PY%"
+if exist "%VENV_PY_WIN%" (
+    set "PYTHON=%VENV_PY_WIN%"
+) else if exist "%VENV_PY_LEGACY%" (
+    set "PYTHON=%VENV_PY_LEGACY%"
 ) else (
     set "PYTHON="
     py -3 -c "import sys" >nul 2>&1

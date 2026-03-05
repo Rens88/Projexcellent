@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import venv
@@ -18,16 +19,32 @@ if str(ROOT_DIR) not in sys.path:
 
 from projexcellent_config import DEFAULT_CONFIG_PATH, load_config, resolve_path
 
-VENV_DIR = CODE_DIR / ".venv"
+LEGACY_VENV_DIR = CODE_DIR / ".venv"
+WINDOWS_VENV_DIR = CODE_DIR / ".venv-win"
 REQUIREMENTS = CODE_DIR / "requirements.txt"
 REPORT_SCRIPT = CODE_DIR / "make_report.py"
 VALID_REPORT_TYPES = {"combined", "yearly", "monthly", "biweekly", "weekly", "daily", "all"}
 
 
-def venv_python_path() -> Path:
+def venv_python_path(venv_dir: Path) -> Path:
     if os.name == "nt":
-        return VENV_DIR / "Scripts" / "python.exe"
-    return VENV_DIR / "bin" / "python"
+        return venv_dir / "Scripts" / "python.exe"
+    return venv_dir / "bin" / "python"
+
+
+def select_venv_dir() -> Path:
+    if os.name != "nt":
+        return LEGACY_VENV_DIR
+
+    windows_python = venv_python_path(WINDOWS_VENV_DIR)
+    if windows_python.exists():
+        return WINDOWS_VENV_DIR
+
+    legacy_python = venv_python_path(LEGACY_VENV_DIR)
+    if legacy_python.exists():
+        return LEGACY_VENV_DIR
+
+    return WINDOWS_VENV_DIR
 
 
 def run_or_exit(cmd: List[str], cwd: Path) -> None:
@@ -36,15 +53,54 @@ def run_or_exit(cmd: List[str], cwd: Path) -> None:
         raise SystemExit(completed.returncode)
 
 
-def ensure_venv() -> Path:
-    python_path = venv_python_path()
-    if python_path.exists():
-        return python_path
-    print(f"Creating virtual environment: {VENV_DIR}")
-    venv.EnvBuilder(with_pip=True).create(str(VENV_DIR))
+def pip_is_usable(python_path: Path) -> bool:
+    completed = subprocess.run(
+        [str(python_path), "-m", "pip", "--version"],
+        cwd=str(ROOT_DIR),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
+def create_venv(venv_dir: Path) -> Path:
+    print(f"Creating virtual environment: {venv_dir}")
+    venv.EnvBuilder(with_pip=True).create(str(venv_dir))
+    python_path = venv_python_path(venv_dir)
     if not python_path.exists():
-        raise SystemExit(f"Failed to create virtual environment at {VENV_DIR}")
+        raise SystemExit(f"Failed to create virtual environment at {venv_dir}")
     return python_path
+
+
+def recreate_venv(venv_dir: Path) -> tuple[Path, Path]:
+    if venv_dir.exists():
+        print(f"Removing broken virtual environment: {venv_dir}")
+        try:
+            shutil.rmtree(venv_dir)
+        except OSError as exc:
+            if os.name == "nt" and venv_dir == LEGACY_VENV_DIR:
+                print(f"Could not remove legacy virtual environment {venv_dir}: {exc}")
+                print(f"Creating a Windows-specific virtual environment instead: {WINDOWS_VENV_DIR}")
+                if WINDOWS_VENV_DIR.exists():
+                    print(f"Removing stale virtual environment: {WINDOWS_VENV_DIR}")
+                    try:
+                        shutil.rmtree(WINDOWS_VENV_DIR)
+                    except OSError as fallback_exc:
+                        raise SystemExit(
+                            f"Failed to remove fallback virtual environment at {WINDOWS_VENV_DIR}: {fallback_exc}"
+                        ) from fallback_exc
+                return WINDOWS_VENV_DIR, create_venv(WINDOWS_VENV_DIR)
+            raise SystemExit(f"Failed to remove virtual environment at {venv_dir}: {exc}") from exc
+    return venv_dir, create_venv(venv_dir)
+
+
+def ensure_venv() -> tuple[Path, Path]:
+    venv_dir = select_venv_dir()
+    python_path = venv_python_path(venv_dir)
+    if python_path.exists():
+        return venv_dir, python_path
+    return venv_dir, create_venv(venv_dir)
 
 
 def parse_args() -> argparse.Namespace:
@@ -92,16 +148,23 @@ def main() -> None:
             f"Allowed values: {allowed}"
         )
 
-    python_path = ensure_venv()
+    venv_dir, python_path = ensure_venv()
 
     install_dependencies = bool(runtime_cfg.get("install_dependencies", True))
     should_install = install_dependencies and not args.skip_install
     if should_install:
+        install_cmd = [str(python_path), "-m", "pip", "install", "-r", str(REQUIREMENTS), "--quiet"]
         print("Installing dependencies (quiet)...")
-        run_or_exit(
-            [str(python_path), "-m", "pip", "install", "-r", str(REQUIREMENTS), "--quiet"],
-            cwd=ROOT_DIR,
-        )
+        try:
+            run_or_exit(install_cmd, cwd=ROOT_DIR)
+        except SystemExit:
+            if pip_is_usable(python_path):
+                raise
+            print("Detected a broken pip in the current virtual environment. Recreating and retrying once...")
+            venv_dir, python_path = recreate_venv(venv_dir)
+            install_cmd[0] = str(python_path)
+            print("Installing dependencies again (quiet)...")
+            run_or_exit(install_cmd, cwd=ROOT_DIR)
 
     cmd = [
         str(python_path),
