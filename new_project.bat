@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal EnableExtensions EnableDelayedExpansion
 
 set "ROOT=%~dp0"
 set "CONFIG_FILE=%ROOT%projexcellent_config.json"
@@ -47,7 +47,6 @@ if errorlevel 1 (
 
 if "%~1"=="" (
     echo No arguments supplied. Enter new project details.
-    set "NP_COUNTER="
     set "NP_SLUG="
     set "NP_PROJECT_NAME="
     set "NP_YEAR="
@@ -58,42 +57,36 @@ if "%~1"=="" (
     set "NP_STATUS="
     set "NP_PRIORITY="
 
-    set /p NP_COUNTER=Counter required, e.g. 12: 
     set /p NP_SLUG=Slug required, e.g. sleep_study: 
-    set /p NP_PROJECT_NAME=Project name required: 
-    set /p NP_YEAR=Year optional, default current year: 
+    set /p NP_PROJECT_NAME=Project name required, e.g. Sleep Study Pilot: 
+    set /p NP_YEAR=Year optional [YYYY], e.g. 2026, default current year: 
     set /p NP_PROGRAMMA=Programma optional, default Other: 
     set /p NP_THEME=Theme optional, default General: 
     set /p NP_OWNER=Owner optional: 
     set /p NP_REQUESTER=Requester optional, default Unknown: 
-    set /p NP_STATUS=Status optional [Proposed/Active/On-hold/Closed/Cancelled]: 
-    set /p NP_PRIORITY=Priority optional [Low/Medium/High/Critical]: 
+    set /p NP_STATUS=Status optional [Proposed/Active/On-hold/Closed/Cancelled], e.g. active: 
+    set /p NP_PRIORITY=Priority optional [Low/Medium/High/Critical], e.g. medium: 
 
-    if "%NP_COUNTER%"=="" (
-        echo ERROR: Counter is required.
-        set "EXIT_CODE=1"
-        goto :end
-    )
-    if "%NP_SLUG%"=="" (
+    if "!NP_SLUG!"=="" (
         echo ERROR: Slug is required.
         set "EXIT_CODE=1"
         goto :end
     )
-    if "%NP_PROJECT_NAME%"=="" (
+    if "!NP_PROJECT_NAME!"=="" (
         echo ERROR: Project name is required.
         set "EXIT_CODE=1"
         goto :end
     )
 
-    set "CMD_ARGS=--config \"%CONFIG_FILE%\" --counter \"%NP_COUNTER%\" --slug \"%NP_SLUG%\" --project-name \"%NP_PROJECT_NAME%\""
-    if not "%NP_YEAR%"=="" set "CMD_ARGS=%CMD_ARGS% --year \"%NP_YEAR%\""
-    if not "%NP_PROGRAMMA%"=="" set "CMD_ARGS=%CMD_ARGS% --programma \"%NP_PROGRAMMA%\""
-    if not "%NP_THEME%"=="" set "CMD_ARGS=%CMD_ARGS% --theme \"%NP_THEME%\""
-    if not "%NP_OWNER%"=="" set "CMD_ARGS=%CMD_ARGS% --owner \"%NP_OWNER%\""
-    if not "%NP_REQUESTER%"=="" set "CMD_ARGS=%CMD_ARGS% --requester \"%NP_REQUESTER%\""
-    if not "%NP_STATUS%"=="" set "CMD_ARGS=%CMD_ARGS% --status \"%NP_STATUS%\""
-    if not "%NP_PRIORITY%"=="" set "CMD_ARGS=%CMD_ARGS% --priority \"%NP_PRIORITY%\""
-    %PYTHON% "%RUNNER%" %CMD_ARGS%
+    set CMD_ARGS=--config "%CONFIG_FILE%" --slug "!NP_SLUG!" --project-name "!NP_PROJECT_NAME!"
+    if not "!NP_YEAR!"=="" set CMD_ARGS=!CMD_ARGS! --year "!NP_YEAR!"
+    if not "!NP_PROGRAMMA!"=="" set CMD_ARGS=!CMD_ARGS! --programma "!NP_PROGRAMMA!"
+    if not "!NP_THEME!"=="" set CMD_ARGS=!CMD_ARGS! --theme "!NP_THEME!"
+    if not "!NP_OWNER!"=="" set CMD_ARGS=!CMD_ARGS! --owner "!NP_OWNER!"
+    if not "!NP_REQUESTER!"=="" set CMD_ARGS=!CMD_ARGS! --requester "!NP_REQUESTER!"
+    if not "!NP_STATUS!"=="" set CMD_ARGS=!CMD_ARGS! --status "!NP_STATUS!"
+    if not "!NP_PRIORITY!"=="" set CMD_ARGS=!CMD_ARGS! --priority "!NP_PRIORITY!"
+    %PYTHON% "%RUNNER%" !CMD_ARGS!
 ) else (
     %PYTHON% "%RUNNER%" --config "%CONFIG_FILE%" %*
 )
@@ -101,6 +94,6 @@ set "EXIT_CODE=%errorlevel%"
 
 :end
 echo.
-echo Press any key to close...
+echo Press any key to close and view messages...
 pause >nul
 exit /b %EXIT_CODE%

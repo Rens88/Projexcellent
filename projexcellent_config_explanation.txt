@@ -30,9 +30,6 @@ Behavior notes for the hours settings
   3) average reported hours per week so far
 
 Per-item explanation
-- name
-  Internal label for this setup. Mainly for identification; can stay "Projexcellent".
-
 - report_title
   Main title shown at the top of the report.
 
@@ -86,23 +83,23 @@ Per-item explanation
   Optional explicit weekly reference hours used for percent-based weekly plots.
   If set, this is preferred as denominator for weekly percentages.
 
-- color_scheme.base_blue
-  Base palette blue used by charts and UI elements.
+- color_scheme.base_one
+  Base palette color 1 (default blue) used by charts and UI elements.
 
-- color_scheme.base_red
-  Base palette red used by charts and UI elements.
+- color_scheme.base_2
+  Base palette color 2 (default red) used by charts and UI elements.
 
-- color_scheme.base_orange
-  Base palette orange used by charts and UI elements.
+- color_scheme.base_3
+  Base palette color 3 (default orange) used by charts and UI elements.
 
-- color_scheme.base_yellow
-  Base palette yellow used by charts and UI elements.
+- color_scheme.base_4
+  Base palette color 4 (default yellow) used by charts and UI elements.
 
-- color_scheme.base_green
-  Base palette green used by charts and UI elements.
+- color_scheme.base_5
+  Base palette color 5 (default green) used by charts and UI elements.
 
-- color_scheme.base_black
-  Base neutral/dark color used by charts and UI elements.
+- color_scheme.base_6
+  Base palette color 6 (default black) used by charts and UI elements.
 
 - color_scheme.year_plan_completed
   Color for completed segments in the sideways yearly plan bar.

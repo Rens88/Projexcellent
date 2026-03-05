@@ -14,7 +14,6 @@ PROJECT_ROOT = CODE_DIR.parent
 DEFAULT_CONFIG_PATH = str(PROJECT_ROOT / "projexcellent_config.json")
 
 _DEFAULT_CONFIG: Dict[str, Any] = {
-    "name": "Projexcellent",
     "report_title": "Project Portfolio Overview",
     "person_name": "john doe",
     "company": {
@@ -53,12 +52,12 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "workable_hours_per_week_reference_value": None,
     },
     "color_scheme": {
-        "base_blue": "#01378A",
-        "base_red": "#E1011A",
-        "base_orange": "#EA6D08",
-        "base_yellow": "#F4C300",
-        "base_green": "#009F3D",
-        "base_black": "#111111",
+        "base_one": "#01378A",
+        "base_2": "#E1011A",
+        "base_3": "#EA6D08",
+        "base_4": "#F4C300",
+        "base_5": "#009F3D",
+        "base_6": "#111111",
         # Sideways yearly plan colors
         "year_plan_completed": "#01378A",
         "year_plan_current_billed": "#01378A",

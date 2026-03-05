@@ -31,23 +31,22 @@ fi
 CMD_ARGS=()
 if [[ "$#" -eq 0 ]]; then
   echo "No arguments supplied. Enter new project details."
-  read -r -p "Counter (required, e.g. 12): " NP_COUNTER
   read -r -p "Slug (required, e.g. sleep_study): " NP_SLUG
-  read -r -p "Project name (required): " NP_PROJECT_NAME
-  read -r -p "Year (optional, default=current year): " NP_YEAR
+  read -r -p "Project name (required, e.g. Sleep Study Pilot): " NP_PROJECT_NAME
+  read -r -p "Year (optional [YYYY], e.g. 2026; default=current year): " NP_YEAR
   read -r -p "Programma (optional, default=Other): " NP_PROGRAMMA
   read -r -p "Theme (optional, default=General): " NP_THEME
   read -r -p "Owner (optional): " NP_OWNER
   read -r -p "Requester (optional, default=Unknown): " NP_REQUESTER
-  read -r -p "Status [Proposed/Active/On-hold/Closed/Cancelled] (optional): " NP_STATUS
-  read -r -p "Priority [Low/Medium/High/Critical] (optional): " NP_PRIORITY
+  read -r -p "Status [Proposed/Active/On-hold/Closed/Cancelled] (optional, e.g. active): " NP_STATUS
+  read -r -p "Priority [Low/Medium/High/Critical] (optional, e.g. medium): " NP_PRIORITY
 
-  if [[ -z "$NP_COUNTER" || -z "$NP_SLUG" || -z "$NP_PROJECT_NAME" ]]; then
-    echo "ERROR: Counter, slug, and project name are required."
+  if [[ -z "$NP_SLUG" || -z "$NP_PROJECT_NAME" ]]; then
+    echo "ERROR: Slug and project name are required."
     exit 1
   fi
 
-  CMD_ARGS=(--config "$CONFIG_FILE" --counter "$NP_COUNTER" --slug "$NP_SLUG" --project-name "$NP_PROJECT_NAME")
+  CMD_ARGS=(--config "$CONFIG_FILE" --slug "$NP_SLUG" --project-name "$NP_PROJECT_NAME")
   [[ -n "$NP_YEAR" ]] && CMD_ARGS+=(--year "$NP_YEAR")
   [[ -n "$NP_PROGRAMMA" ]] && CMD_ARGS+=(--programma "$NP_PROGRAMMA")
   [[ -n "$NP_THEME" ]] && CMD_ARGS+=(--theme "$NP_THEME")

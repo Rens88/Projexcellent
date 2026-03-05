@@ -8,8 +8,13 @@ import re
 import shutil
 from datetime import date
 from pathlib import Path
+from typing import Optional
 
 from projexcellent_config import DEFAULT_CONFIG_PATH, load_config, resolve_path
+
+
+STATUS_CHOICES = ["Proposed", "Active", "On-hold", "Closed", "Cancelled"]
+PRIORITY_CHOICES = ["Low", "Medium", "High", "Critical"]
 
 
 def sanitize_slug(value: str) -> str:
@@ -32,11 +37,72 @@ def set_kv(ws, key: str, value) -> None:
     ws.cell(row=new_row, column=2).value = value
 
 
+def parse_year(value: str) -> int:
+    raw = str(value).strip()
+    if not re.fullmatch(r"\d{4}", raw):
+        raise argparse.ArgumentTypeError("Year must use YYYY format (e.g. 2026).")
+    year = int(raw)
+    if year < 1900 or year > 9999:
+        raise argparse.ArgumentTypeError("Year must be between 1900 and 9999.")
+    return year
+
+
+def _normalize_choice(raw: str, choices: list[str], aliases: Optional[dict[str, str]] = None) -> str:
+    text = str(raw).strip()
+    if not text:
+        raise SystemExit("Input value is empty.")
+    aliases = aliases or {}
+    key = text.casefold()
+    for choice in choices:
+        if key == choice.casefold():
+            return choice
+    if key in aliases:
+        return aliases[key]
+    valid = ", ".join(choices)
+    raise SystemExit(f"Invalid value '{raw}'. Valid options (case-insensitive): {valid}.")
+
+
+def normalize_status(raw: str) -> str:
+    aliases = {
+        "on hold": "On-hold",
+        "on_hold": "On-hold",
+        "onhold": "On-hold",
+        "canceled": "Cancelled",
+    }
+    return _normalize_choice(raw, STATUS_CHOICES, aliases=aliases)
+
+
+def normalize_priority(raw: str) -> str:
+    return _normalize_choice(raw, PRIORITY_CHOICES)
+
+
+def get_next_counter(projects_dir: Path, year: int) -> int:
+    if not projects_dir.exists():
+        return 1
+    max_counter = 0
+    pattern = re.compile(rf"^{year:04d}_(\d{{4,}})_")
+    for child in projects_dir.iterdir():
+        if not child.is_dir():
+            continue
+        match = pattern.match(child.name)
+        if not match:
+            continue
+        try:
+            max_counter = max(max_counter, int(match.group(1)))
+        except ValueError:
+            continue
+    return max_counter + 1
+
+
 def parse_args() -> argparse.Namespace:
     this_year = date.today().year
     parser = argparse.ArgumentParser(description="Create a new Projexcellent project.")
-    parser.add_argument("--year", type=int, default=this_year, help=f"Project year (default: {this_year}).")
-    parser.add_argument("--counter", type=int, required=True, help="Project counter number, e.g. 12 -> 0012.")
+    parser.add_argument("--year", type=parse_year, default=this_year, help=f"Project year YYYY (default: {this_year}).")
+    parser.add_argument(
+        "--counter",
+        type=int,
+        help="Optional counter override. If omitted, the next available counter for the year is used.",
+    )
     parser.add_argument("--slug", required=True, help="Short slug for folder name.")
     parser.add_argument("--project-name", required=True, help="Human-readable project name.")
     parser.add_argument("--programma", default="Other", help="Programma value.")
@@ -46,14 +112,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--status",
         default="Proposed",
-        choices=["Proposed", "Active", "On-hold", "Closed", "Cancelled"],
-        help="Initial project status.",
+        help="Initial project status (case-insensitive): Proposed, Active, On-hold, Closed, Cancelled.",
     )
     parser.add_argument(
         "--priority",
         default="Medium",
-        choices=["Low", "Medium", "High", "Critical"],
-        help="Initial project priority.",
+        help="Initial project priority (case-insensitive): Low, Medium, High, Critical.",
     )
     parser.add_argument("--force", action="store_true", help="Overwrite target folder if it already exists.")
     parser.add_argument(
@@ -85,8 +149,14 @@ def main() -> None:
     if not time_log_template.exists():
         raise SystemExit(f"Missing template: {time_log_template}")
 
+    counter = args.counter if args.counter is not None else get_next_counter(projects_dir, args.year)
+    if counter <= 0:
+        raise SystemExit("Counter must be a positive integer.")
+
     slug = sanitize_slug(args.slug)
-    project_id = f"{args.year:04d}_{args.counter:04d}"
+    status = normalize_status(args.status)
+    priority = normalize_priority(args.priority)
+    project_id = f"{args.year:04d}_{counter:04d}"
     folder_name = f"{project_id}_{slug}"
     project_dir = projects_dir / folder_name
     deliverables_dir = project_dir / "Deliverables"
@@ -117,8 +187,8 @@ def main() -> None:
     set_kv(info_ws, "theme (if multiple, separate by |)", args.theme.strip())
     set_kv(info_ws, "owner", args.owner.strip())
     set_kv(info_ws, "requester", args.requester.strip())
-    set_kv(info_ws, "status", args.status)
-    set_kv(info_ws, "priority", args.priority)
+    set_kv(info_ws, "status", status)
+    set_kv(info_ws, "priority", priority)
     set_kv(info_ws, "start_date", today)
     set_kv(info_ws, "target_end_date", "")
     set_kv(info_ws, "actual_end_date", "")

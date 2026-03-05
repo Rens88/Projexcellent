@@ -116,6 +116,12 @@ def _apply_runtime_config(config_path: Optional[str] = None) -> None:
             return txt if txt.startswith("#") else f"#{txt}"
         return fallback
 
+    def _coerce_cfg_color(primary_key: str, fallback: str, legacy_key: Optional[str] = None) -> str:
+        raw = color_cfg.get(primary_key)
+        if (raw is None or str(raw).strip() == "") and legacy_key:
+            raw = color_cfg.get(legacy_key)
+        return _coerce_hex(raw, fallback)
+
     global CONFIG_PATH
     global CONFIG
     global PROJECTEN_DIR
@@ -201,12 +207,14 @@ def _apply_runtime_config(config_path: Optional[str] = None) -> None:
     WORKABLE_HOURS_PER_YEAR_OVERRIDE = _as_positive_float(hours_cfg.get("workable_hours_per_year"))
     WORKABLE_HOURS_PER_WEEK_REFERENCE_VALUE = _as_positive_float(hours_cfg.get("workable_hours_per_week_reference_value"))
 
-    BASE_BLUE = _coerce_hex(color_cfg.get("base_blue"), "#01378A")
-    BASE_RED = _coerce_hex(color_cfg.get("base_red"), "#E1011A")
-    BASE_ORANGE = _coerce_hex(color_cfg.get("base_orange"), "#EA6D08")
-    BASE_YELLOW = _coerce_hex(color_cfg.get("base_yellow"), "#F4C300")
-    BASE_GREEN = _coerce_hex(color_cfg.get("base_green"), "#009F3D")
-    BASE_BLACK = _coerce_hex(color_cfg.get("base_black"), "#111111")
+    # Canonical keys: base_one, base_2..base_6.
+    # Legacy keys remain supported as fallback for older configs.
+    BASE_BLUE = _coerce_cfg_color("base_one", "#01378A", legacy_key="base_blue")
+    BASE_RED = _coerce_cfg_color("base_2", "#E1011A", legacy_key="base_red")
+    BASE_ORANGE = _coerce_cfg_color("base_3", "#EA6D08", legacy_key="base_orange")
+    BASE_YELLOW = _coerce_cfg_color("base_4", "#F4C300", legacy_key="base_yellow")
+    BASE_GREEN = _coerce_cfg_color("base_5", "#009F3D", legacy_key="base_green")
+    BASE_BLACK = _coerce_cfg_color("base_6", "#111111", legacy_key="base_black")
 
     TEAMNL_BASE_COLORS = [BASE_BLUE, BASE_RED, BASE_ORANGE, BASE_YELLOW, BASE_GREEN, BASE_BLACK]
 
@@ -736,6 +744,27 @@ def compute_report_periods(asof_date: date) -> Dict[str, Dict[str, Any]]:
         "monthly": dict(label="Month (to-date)", start=monthly_start, end=monthly_end, key=month_key),
         "yearly": dict(label="Year (to-date)", start=yearly_start, end=yearly_end, key=year_key),
     }
+
+
+_MONTH_ABBR_LOWER = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+
+
+def _fmt_day_month_lower(d: date) -> str:
+    return f"{int(d.day)}-{_MONTH_ABBR_LOWER[d.month - 1]}"
+
+
+def format_period_range_compact(period_start: date, period_end: date) -> str:
+    if period_start == period_end:
+        return f"{_fmt_day_month_lower(period_start)} ({period_start.year:04d})"
+    if period_start.year == period_end.year:
+        return (
+            f"{_fmt_day_month_lower(period_start)} to {_fmt_day_month_lower(period_end)} "
+            f"({period_start.year:04d})"
+        )
+    return (
+        f"{_fmt_day_month_lower(period_start)} ({period_start.year:04d}) "
+        f"to {_fmt_day_month_lower(period_end)} ({period_end.year:04d})"
+    )
 
 
 def list_completed_month_periods(asof_date: date, time_entries_df: Optional[pd.DataFrame] = None) -> List[Dict[str, Any]]:
@@ -1513,6 +1542,27 @@ def compute_nn_summary(
     return summary, None
 
 
+def _build_nn_sideways_bar_subtitle_text(nn_summary: Optional[Dict[str, Any]]) -> str:
+    if not nn_summary:
+        return ""
+
+    nn_total_hours = _to_float(nn_summary.get("nn_total_hours")) or 0.0
+    capacity_hours = _to_float(nn_summary.get("year_available_hours")) or 0.0
+    month_segments = nn_summary.get("month_segments") or []
+    if nn_total_hours <= 0:
+        nn_total_hours = sum(
+            max(_to_float(segment.get("hours")) or 0.0, 0.0)
+            for segment in month_segments
+        )
+    if nn_total_hours <= 0:
+        return ""
+
+    subtitle_text = f"100% = {_company_label_long()} total: {nn_total_hours:.0f} h"
+    if capacity_hours > 0:
+        subtitle_text += f" | Capacity plan: {capacity_hours:.0f} h"
+    return subtitle_text
+
+
 def build_nn_sideways_bar_chart_html(nn_summary: Optional[Dict[str, Any]], div_id: str = "nn-sideways-bar") -> str:
     if not nn_summary:
         return ""
@@ -1637,7 +1687,7 @@ def build_nn_sideways_bar_chart_html(nn_summary: Optional[Dict[str, Any]], div_i
                 y=[_company_label_short()],
                 orientation="h",
                 marker=dict(color=color, line=dict(color="#FFFFFF", width=1)),
-                width=[0.72],
+                width=[0.62],
                 text=[str(segment.get("month_abbr", ""))],
                 textposition="inside",
                 insidetextanchor="middle",
@@ -1669,15 +1719,10 @@ def build_nn_sideways_bar_chart_html(nn_summary: Optional[Dict[str, Any]], div_i
     tickvals = [nn_total_hours * f for f in tick_fracs]
     ticktext = [f"{int(f * 100)}%" for f in tick_fracs]
 
-    subtitle_text = (
-        f"100% = {_company_label_long()} total: {nn_total_hours:.0f} h"
-        + (f" | Capacity plan: {capacity_hours:.0f} h" if capacity_hours > 0 else "")
-    )
-
     fig.update_layout(
         barmode="stack",
-        margin=dict(l=4, r=6, t=50, b=20),
-        height=166,
+        margin=dict(l=2, r=4, t=8, b=14),
+        height=128,
         hovermode="closest",
         hoverdistance=12,
         hoverlabel=dict(font=dict(size=11, family="Consolas, 'Courier New', monospace"), align="left"),
@@ -1694,19 +1739,6 @@ def build_nn_sideways_bar_chart_html(nn_summary: Optional[Dict[str, Any]], div_i
             fixedrange=True,
         ),
         yaxis=dict(showticklabels=False, showgrid=False, zeroline=False, fixedrange=True),
-        annotations=[
-            dict(
-                text=subtitle_text,
-                x=0.0,
-                y=1.04,
-                xref="paper",
-                yref="paper",
-                showarrow=False,
-                xanchor="left",
-                yanchor="bottom",
-                font=dict(size=11, color="#444"),
-            )
-        ],
     )
     return pio.to_html(fig, include_plotlyjs=False, full_html=False, div_id=div_id)
 
@@ -1751,7 +1783,7 @@ def build_nn_metrics_html(nn_summary: Optional[Dict[str, Any]], note: Optional[s
     )
 
 
-def build_nn_sideways_bar_title_html() -> str:
+def build_nn_sideways_bar_title_html(nn_summary: Optional[Dict[str, Any]] = None) -> str:
     help_lines = [
         f"100% reflects the total {_company_label_long()} hours planned for the selected year.",
         (
@@ -1770,9 +1802,15 @@ def build_nn_sideways_bar_title_html() -> str:
         "Past months always show actual billed hours.",
     ]
     tooltip_html = "<br>".join(html.escape(line) for line in help_lines)
+    subtitle_text = _build_nn_sideways_bar_subtitle_text(nn_summary)
+    title_text = f"{_company_label_short()} Year Plan (Actual + Expected)"
+    subtitle_html = f" | {html.escape(subtitle_text)}" if subtitle_text else ""
     return (
         "<div class='nn-sideways-bar-title-row'>"
-        f"<div class='nn-sideways-bar-title'>{html.escape(_company_label_short())} Year Plan (Actual + Expected)</div>"
+        "<div class='nn-sideways-bar-title'>"
+        f"{html.escape(title_text)}"
+        f"<span class='nn-sideways-bar-subtitle'>{subtitle_html}</span>"
+        "</div>"
         f"<span class='nn-help-icon' tabindex='0' role='button' aria-label='{html.escape(_company_label_short())} year plan explanation'>?"
         f"<span class='nn-help-tooltip'>{tooltip_html}</span>"
         "</span>"
@@ -1852,26 +1890,36 @@ def build_logged_hours_breakdown_html(
     title: str = "Logged hours (by project)",
     show_percentage: bool = False,
     include_total_in_note: bool = False,
+    foldable: bool = True,
 ) -> str:
-    if time_entries_df_filtered is None or time_entries_df_filtered.empty:
+    def _wrap(content_html: str) -> str:
+        if foldable:
+            return (
+                "<details class='hours-breakdown'>"
+                f"<summary>{html.escape(title)}</summary>"
+                f"{content_html}"
+                "</details>"
+            )
         return (
-            "<details class='hours-breakdown'>"
-            f"<summary>{html.escape(title)}</summary>"
-            "<div class='hours-breakdown-note'>No time log entries in this period.</div>"
-            "</details>"
+            "<section class='hours-breakdown'>"
+            "<div class='hours-breakdown-header'>"
+            f"<h3>{html.escape(title)}</h3>"
+            "</div>"
+            f"{content_html}"
+            "</section>"
         )
+
+    if time_entries_df_filtered is None or time_entries_df_filtered.empty:
+        return _wrap("<div class='hours-breakdown-note'>No time log entries in this period.</div>")
 
     required_cols = {"project_id", "duration_hours"}
     missing = [c for c in required_cols if c not in time_entries_df_filtered.columns]
     if missing:
-        return (
-            "<details class='hours-breakdown'>"
-            f"<summary>{html.escape(title)}</summary>"
+        return _wrap(
             "<div class='hours-breakdown-note'>"
             "Time log entries are missing expected columns: "
             + html.escape(", ".join(missing))
             + "</div>"
-            "</details>"
         )
 
     entries = time_entries_df_filtered.copy()
@@ -1896,12 +1944,7 @@ def build_logged_hours_breakdown_html(
     else:
         entries["duration_minutes"] = entries["duration_hours"] * 60.0
     if entries.empty:
-        return (
-            "<details class='hours-breakdown'>"
-            f"<summary>{html.escape(title)}</summary>"
-            "<div class='hours-breakdown-note'>No logged hours in this period.</div>"
-            "</details>"
-        )
+        return _wrap("<div class='hours-breakdown-note'>No logged hours in this period.</div>")
 
     totals = (
         entries.groupby(["project_id", "project_name"], as_index=False)["duration_minutes"]
@@ -1982,14 +2025,11 @@ def build_logged_hours_breakdown_html(
             note_text += f" Total logged time: {_format_minutes_hhmm(total_period_minutes)}."
     else:
         note_text = "Click a project to expand."
-    return (
-        "<details class='hours-breakdown'>"
-        f"<summary>{html.escape(title)}</summary>"
+    return _wrap(
         f"<div class='hours-breakdown-note'>{html.escape(note_text)}</div>"
         "<div class='hours-breakdown-list'>"
         + "".join(projects_html)
         + "</div>"
-        "</details>"
     )
 
 
@@ -2489,7 +2529,7 @@ def add_trend_started_closed(
             x=0,
             xref="x domain",
             y=1.18,
-            yref=f"y{subplot_row} domain",
+            yref=axis_domain_ref("y", subplot_row),
             showarrow=False,
             align="left",
             row=subplot_row,
@@ -2510,7 +2550,7 @@ def add_trend_started_closed(
             x=0,
             xref="x domain",
             y=1.18,
-            yref=f"y{subplot_row} domain",
+            yref=axis_domain_ref("y", subplot_row),
             showarrow=False,
             align="left",
             row=subplot_row,
@@ -2592,7 +2632,7 @@ def add_trend_started_closed(
         x=0,
         xref="x domain",
         y=1.18,
-        yref=f"y{subplot_row} domain",
+        yref=axis_domain_ref("y", subplot_row),
         showarrow=False,
         align="left",
         row=subplot_row,
@@ -2633,7 +2673,7 @@ def add_hours_per_week(
             x=0,
             xref="x domain",
             y=1.18,
-            yref=f"y{subplot_row} domain",
+            yref=axis_domain_ref("y", subplot_row),
             showarrow=False,
             align="left",
             row=subplot_row,
@@ -2655,7 +2695,7 @@ def add_hours_per_week(
             x=0,
             xref="x domain",
             y=1.18,
-            yref=f"y{subplot_row} domain",
+            yref=axis_domain_ref("y", subplot_row),
             showarrow=False,
             align="left",
             row=subplot_row,
@@ -2681,7 +2721,7 @@ def add_hours_per_week(
             x=0,
             xref="x domain",
             y=1.18,
-            yref=f"y{subplot_row} domain",
+            yref=axis_domain_ref("y", subplot_row),
             showarrow=False,
             align="left",
             row=subplot_row,
@@ -2798,7 +2838,7 @@ def add_hours_per_week(
             x=0.5,
             xref="x domain",
             y=0.5,
-            yref=f"y{subplot_row} domain",
+            yref=axis_domain_ref("y", subplot_row),
             showarrow=False,
             align="center",
             row=subplot_row,
@@ -2812,7 +2852,7 @@ def add_hours_per_week(
         x=0,
         xref="x domain",
         y=1.18,
-        yref=f"y{subplot_row} domain",
+        yref=axis_domain_ref("y", subplot_row),
         showarrow=False,
         align="left",
         row=subplot_row,
@@ -2846,7 +2886,7 @@ def add_estimated_magnitude_per_week(
             x=0,
             xref="x domain",
             y=1.18,
-            yref=f"y{subplot_row} domain",
+            yref=axis_domain_ref("y", subplot_row),
             showarrow=False,
             align="left",
             row=subplot_row,
@@ -2868,7 +2908,7 @@ def add_estimated_magnitude_per_week(
             x=0,
             xref="x domain",
             y=1.18,
-            yref=f"y{subplot_row} domain",
+            yref=axis_domain_ref("y", subplot_row),
             showarrow=False,
             align="left",
             row=subplot_row,
@@ -2880,6 +2920,15 @@ def add_estimated_magnitude_per_week(
 
     project_rows["project_id"] = project_rows["project_id"].astype(str)
     project_rows = project_rows.set_index("project_id")
+
+    def _resolve_hours_cap(row: pd.Series) -> Optional[float]:
+        hours_cap = _to_float_relaxed(row.get("hours_cap"))
+        if hours_cap is not None:
+            return hours_cap
+        cap_key = _find_col([str(c) for c in row.index], ["hours", "cap"])
+        if cap_key:
+            return _to_float_relaxed(row.get(cap_key))
+        return None
 
     def _resolve_expected_end(row: pd.Series) -> Optional[pd.Timestamp]:
         expected = row.get("expected_end_date")
@@ -2927,8 +2976,11 @@ def add_estimated_magnitude_per_week(
         if total_active_weeks == 0:
             continue
 
+        hours_cap = _resolve_hours_cap(row)
         magnitude_value = row.get("estimated_magnitude")
-        weight = estimate_magnitude_weight(magnitude_value)
+        magnitude_weight = float(estimate_magnitude_weight(magnitude_value))
+        use_hours_cap = hours_cap is not None and hours_cap > 0
+        weight = float(hours_cap) if use_hours_cap else magnitude_weight
         per_week = weight / total_active_weeks
         y_vals = [per_week if is_active else 0.0 for is_active in active.tolist()]
 
@@ -2937,8 +2989,11 @@ def add_estimated_magnitude_per_week(
         hover_text = build_hover_text(
             row,
             extra={
+                "weight_source": "hours_cap" if use_hours_cap else "estimated_magnitude",
+                "hours_cap": hours_cap if hours_cap is not None else "",
                 "estimated_magnitude": magnitude_value,
-                "weight": weight,
+                "estimated_magnitude_weight": f"{magnitude_weight:.2f}",
+                "weight": f"{weight:.2f}",
                 "resolved_end_date": resolve_end_date_for_hover(row),
             },
         )
@@ -2966,7 +3021,7 @@ def add_estimated_magnitude_per_week(
         x=0,
         xref="x domain",
         y=1.18,
-        yref=f"y{subplot_row} domain",
+        yref=axis_domain_ref("y", subplot_row),
         showarrow=False,
         align="left",
         row=subplot_row,
@@ -3256,7 +3311,7 @@ def build_hours_figure(
             projects_df,
             time_entries_df_filtered,
             1,
-            "Reported time spent per project",
+            "Billed hours per project",
             project_color_map,
         )
         add_stacked_hours_bars(
@@ -3299,7 +3354,7 @@ def build_hours_figure(
             projects_df,
             time_entries_df_filtered,
             1,
-            "Reported time spent per project",
+            "Billed hours per project",
             project_color_map,
         )
         add_hours_per_week(
@@ -3307,7 +3362,7 @@ def build_hours_figure(
             projects_df,
             time_entries_df_filtered,
             2,
-            "Reported time per week (stacked by project)",
+            "Billed hours per week (stacked by project)",
             project_color_map,
             display_start=display_start,
             display_end=display_end,
@@ -3385,6 +3440,201 @@ def build_hours_figure(
         showlegend=False,
     )
     return fig
+
+
+def _apply_standard_hours_layout(fig: go.Figure, height: int) -> None:
+    fig.update_layout(
+        barmode="stack",
+        height=height,
+        margin=dict(l=60, r=60, t=40, b=60),
+        plot_bgcolor="rgba(255,255,255,1)",
+        paper_bgcolor="rgba(250,250,250,1)",
+        hoverlabel=dict(namelength=-1),
+        showlegend=False,
+    )
+
+
+def build_hours_section_figures(
+    projects_df: pd.DataFrame,
+    time_entries_df_filtered: pd.DataFrame,
+    period_start: date,
+    period_end: date,
+    report_type: str,
+) -> Dict[str, go.Figure]:
+    _, project_color_map = build_color_maps(projects_df)
+    display_start = period_start
+    display_end = period_end
+    if report_type == "yearly":
+        display_end = date(period_start.year, 12, 31)
+
+    section_figs: Dict[str, go.Figure] = {}
+
+    primary_fig = make_subplots(rows=1, cols=1, shared_xaxes=False)
+    add_reported_hours_per_project(
+        primary_fig,
+        projects_df,
+        time_entries_df_filtered,
+        1,
+        "Billed hours per project",
+        project_color_map,
+    )
+    apply_axis_style(primary_fig, 1)
+    _apply_standard_hours_layout(primary_fig, height=520)
+    section_figs["primary"] = primary_fig
+
+    if report_type in ("monthly", "yearly"):
+        timeline_fig = make_subplots(rows=2, cols=1, shared_xaxes=False, vertical_spacing=0.12)
+        add_hours_per_week(
+            timeline_fig,
+            projects_df,
+            time_entries_df_filtered,
+            1,
+            "Billed hours per week (stacked by project)",
+            project_color_map,
+            display_start=display_start,
+            display_end=display_end,
+            data_start=period_start,
+            data_end=period_end,
+        )
+        add_estimated_magnitude_per_week(
+            timeline_fig,
+            projects_df,
+            2,
+            "Estimated magnitude per week (stacked by project)",
+            project_color_map,
+            period_start=display_start,
+            period_end=display_end,
+        )
+        apply_axis_style(timeline_fig, 2)
+        _apply_standard_hours_layout(timeline_fig, height=980)
+        section_figs["timeline"] = timeline_fig
+
+    deep_dive_fig = make_subplots(
+        rows=4,
+        cols=1,
+        shared_xaxes=False,
+        vertical_spacing=0.10,
+        row_heights=[0.26, 0.26, 0.26, 0.22],
+        specs=[[{"type": "xy"}], [{"type": "xy"}], [{"type": "xy"}], [{"type": "domain"}]],
+    )
+    add_stacked_hours_bars(
+        deep_dive_fig,
+        projects_df,
+        time_entries_df_filtered,
+        "programma",
+        1,
+        "Hours per programma (stacked: each project contributes its hours)",
+        project_color_map,
+        section_title="Deep-dive",
+    )
+    add_stacked_hours_bars(
+        deep_dive_fig,
+        projects_df,
+        time_entries_df_filtered,
+        "theme",
+        2,
+        "Hours per theme (stacked: each project contributes its hours)",
+        project_color_map,
+    )
+    add_stacked_hours_bars(
+        deep_dive_fig,
+        projects_df,
+        time_entries_df_filtered,
+        "requester",
+        3,
+        "Hours per requester (stacked: each project contributes its hours)",
+        project_color_map,
+    )
+    add_activitytype_weighted_pie(
+        deep_dive_fig,
+        time_entries_df_filtered,
+        4,
+        "ActivityType* share (weighted by hours)",
+    )
+    apply_axis_style(deep_dive_fig, 4)
+    _apply_standard_hours_layout(deep_dive_fig, height=1720)
+    section_figs["deep_dive"] = deep_dive_fig
+
+    return section_figs
+
+
+def build_percentage_section_payloads(
+    section_figs: Dict[str, go.Figure],
+    total_period_hours: float,
+    weekly_reference_hours: Optional[float],
+    weekly_progress_guidance: Optional[Dict[str, Any]],
+    timeline_explanation_html: str,
+) -> List[Dict[str, Any]]:
+    sections: List[Dict[str, Any]] = []
+
+    primary_source = section_figs.get("primary")
+    if primary_source is not None:
+        primary_pct = build_percentage_figure_from_hours(
+            primary_source,
+            total_period_hours=total_period_hours,
+            weekly_reference_hours=weekly_reference_hours,
+            weekly_progress_guidance=weekly_progress_guidance,
+        )
+        sections.append(
+            {
+                "section_id": "reported",
+                "title": "Time-distribution across projects",
+                "figure": primary_pct,
+                "foldable": False,
+                "open": True,
+                "extra_html": "",
+            }
+        )
+
+    timeline_source = section_figs.get("timeline")
+    if timeline_source is not None:
+        timeline_pct = build_percentage_figure_from_hours(
+            timeline_source,
+            total_period_hours=total_period_hours,
+            weekly_reference_hours=weekly_reference_hours,
+            weekly_progress_guidance=weekly_progress_guidance,
+        )
+        _ensure_subplot_title_annotation(
+            timeline_pct,
+            1,
+            "Billed hours per week (stacked by project)",
+        )
+        sections.append(
+            {
+                "section_id": "timeline",
+                "title": "Timeline",
+                "figure": timeline_pct,
+                "foldable": True,
+                "open": False,
+                "extra_html": timeline_explanation_html or "",
+            }
+        )
+
+    deep_dive_source = section_figs.get("deep_dive")
+    if deep_dive_source is not None:
+        deep_dive_pct = build_percentage_figure_from_hours(
+            deep_dive_source,
+            total_period_hours=total_period_hours,
+            weekly_reference_hours=weekly_reference_hours,
+            weekly_progress_guidance=weekly_progress_guidance,
+        )
+        _ensure_subplot_title_annotation(
+            deep_dive_pct,
+            1,
+            "Hours per programma (stacked: each project contributes its hours)",
+        )
+        sections.append(
+            {
+                "section_id": "deep-dive",
+                "title": "Deep-dive",
+                "figure": deep_dive_pct,
+                "foldable": True,
+                "open": False,
+                "extra_html": "",
+            }
+        )
+
+    return sections
 
 
 def _to_float_list(values: Any) -> List[float]:
@@ -3500,12 +3750,290 @@ def compute_weekly_reference_hours(
     return ref, "avg_reported_so_far", None
 
 
+def compute_weekly_progress_guidance(
+    all_time_entries_df: pd.DataFrame,
+    period_end: date,
+    nn_summary: Optional[Dict[str, Any]],
+    weekly_reference_hours: Optional[float],
+) -> Optional[Dict[str, Any]]:
+    """
+    Guidance lines for "Reported time per week" percentage chart:
+      - Avg percent worked so far (from year start through current week)
+      - Avg percent needed for remaining year (from next week through year end)
+    """
+    ref = _to_float(weekly_reference_hours)
+    if ref is None or ref <= 0:
+        return None
+
+    summary = nn_summary or {}
+    yearly_total = _to_float(summary.get("nn_total_hours"))
+    if yearly_total is None or yearly_total <= 0:
+        return None
+
+    yearly_available = _to_float(summary.get("year_available_hours"))
+    remaining_from_summary = _to_float(summary.get("remaining"))
+
+    year_start = date(period_end.year, 1, 1)
+    year_end = date(period_end.year, 12, 31)
+    year_start_week = year_start - timedelta(days=year_start.weekday())
+    current_week_start = period_end - timedelta(days=period_end.weekday())
+    current_week_end = min(current_week_start + timedelta(days=6), year_end)
+    next_week_start = current_week_start + timedelta(days=7)
+    year_end_week_start = year_end - timedelta(days=year_end.weekday())
+
+    reported_so_far = 0.0
+    if (
+        all_time_entries_df is not None
+        and not all_time_entries_df.empty
+        and "date" in all_time_entries_df.columns
+        and "duration_hours" in all_time_entries_df.columns
+    ):
+        entries = all_time_entries_df.copy()
+        entries["date"] = pd.to_datetime(entries["date"], errors="coerce")
+        entries["duration_hours"] = pd.to_numeric(entries["duration_hours"], errors="coerce").fillna(0.0)
+        entries = entries.dropna(subset=["date"])
+        if not entries.empty:
+            entries = entries.loc[
+                (entries["date"] >= pd.Timestamp(year_start))
+                & (entries["date"] <= pd.Timestamp(period_end))
+            ]
+            reported_so_far = float(entries["duration_hours"].sum())
+
+    billed_so_far: Optional[float] = None
+    if remaining_from_summary is not None:
+        billed_so_far = max(float(yearly_total) - float(remaining_from_summary), 0.0)
+
+    tracked_source = "reported"
+    tracked_so_far = reported_so_far
+    if billed_so_far is not None:
+        tracked_source = "billed"
+        tracked_so_far = billed_so_far
+
+    elapsed_weeks = max(((current_week_start - year_start_week).days // 7) + 1, 1)
+    avg_so_far_hours = tracked_so_far / float(elapsed_weeks)
+    worked_pct = avg_so_far_hours * 100.0 / ref
+
+    remaining_hours = (
+        max(float(remaining_from_summary), 0.0)
+        if remaining_from_summary is not None
+        else max(float(yearly_total) - tracked_so_far, 0.0)
+    )
+    weeks_remaining = 0
+    remaining_pct: Optional[float] = None
+    avg_remaining_hours: Optional[float] = None
+    if next_week_start <= year_end_week_start:
+        weeks_remaining = ((year_end_week_start - next_week_start).days // 7) + 1
+        if weeks_remaining > 0:
+            avg_remaining_hours = remaining_hours / float(weeks_remaining)
+            remaining_pct = avg_remaining_hours * 100.0 / ref
+
+    return {
+        "reference_hours_per_week": ref,
+        "yearly_total_hours": yearly_total,
+        "yearly_available_hours": yearly_available,
+        "reported_hours_so_far": reported_so_far,
+        "billed_hours_so_far": billed_so_far,
+        "tracked_source": tracked_source,
+        "tracked_hours_so_far": tracked_so_far,
+        "elapsed_weeks": elapsed_weeks,
+        "worked_pct": worked_pct,
+        "worked_x0": year_start_week,
+        "worked_x1": current_week_end,
+        "worked_hours_per_week": avg_so_far_hours,
+        "remaining_hours": remaining_hours,
+        "weeks_remaining": weeks_remaining,
+        "remaining_pct": remaining_pct,
+        "remaining_x0": next_week_start if weeks_remaining > 0 else None,
+        "remaining_x1": year_end,
+        "remaining_hours_per_week": avg_remaining_hours,
+    }
+
+
+def compute_monthly_average_guidance(
+    period_time_entries_df: pd.DataFrame,
+    period_start: date,
+    period_end: date,
+    weekly_reference_hours: Optional[float],
+    nn_summary: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Month tab guidance:
+      - Summary values for worked/billed pace in the selected period.
+    """
+    ref = _to_float(weekly_reference_hours)
+    if ref is None or ref <= 0:
+        return None
+
+    total_reported_hours = 0.0
+    if (
+        period_time_entries_df is not None
+        and not period_time_entries_df.empty
+        and "duration_hours" in period_time_entries_df.columns
+    ):
+        total_reported_hours = float(
+            pd.to_numeric(period_time_entries_df["duration_hours"], errors="coerce").fillna(0.0).sum()
+        )
+
+    billed_period_hours = _to_float((nn_summary or {}).get("billed"))
+    tracked_source = "reported"
+    tracked_hours = total_reported_hours
+    if billed_period_hours is not None and billed_period_hours >= 0:
+        tracked_source = "billed"
+        tracked_hours = float(billed_period_hours)
+
+    week_starts, _, _, _ = build_period_week_grid(period_start, period_end)
+    weeks_in_period = len(week_starts)
+    if weeks_in_period <= 0:
+        return None
+
+    avg_hpw = tracked_hours / float(weeks_in_period)
+    worked_pct = avg_hpw * 100.0 / ref
+
+    return {
+        "reference_hours_per_week": ref,
+        "tracked_source": tracked_source,
+        "tracked_hours_so_far": tracked_hours,
+        "reported_hours_so_far": total_reported_hours,
+        "billed_hours_so_far": billed_period_hours,
+        "elapsed_weeks": weeks_in_period,
+        "worked_pct": worked_pct,
+        "worked_x0": None,
+        "worked_x1": period_end,
+        "worked_hours_per_week": avg_hpw,
+        "remaining_pct": None,
+        "remaining_x0": None,
+        "remaining_x1": None,
+        "remaining_hours_per_week": None,
+        "remaining_hours": None,
+        "weeks_remaining": 0,
+        "show_worked_line": False,
+    }
+
+
+def build_monthly_average_explanation_html(
+    weekly_progress_guidance: Optional[Dict[str, Any]],
+) -> str:
+    if not weekly_progress_guidance:
+        return ""
+
+    ref = _to_float(weekly_progress_guidance.get("reference_hours_per_week"))
+    tracked_hours = _to_float(weekly_progress_guidance.get("tracked_hours_so_far"))
+    elapsed_weeks = int(weekly_progress_guidance.get("elapsed_weeks") or 0)
+    worked_hpw = _to_float(weekly_progress_guidance.get("worked_hours_per_week"))
+    worked_pct = _to_float(weekly_progress_guidance.get("worked_pct"))
+    if ref is None or ref <= 0 or tracked_hours is None or elapsed_weeks <= 0 or worked_hpw is None or worked_pct is None:
+        return ""
+
+    summary_sentence = (
+        f"During this period, {tracked_hours:.1f} hours have been billed in {elapsed_weeks} weeks, "
+        f"averaging {worked_hpw:.1f} h/week ({worked_pct:.1f} % of the assumed {ref:.1f} h/week)."
+    )
+
+    return "<div class='weekly-guidance'><div>" + html.escape(summary_sentence) + "</div></div>"
+
+
+def build_weekly_progress_explanation_html(
+    weekly_progress_guidance: Optional[Dict[str, Any]],
+    weekly_reference_source: str,
+) -> str:
+    if not weekly_progress_guidance:
+        return ""
+
+    ref = _to_float(weekly_progress_guidance.get("reference_hours_per_week"))
+    if ref is None or ref <= 0:
+        return ""
+
+    yearly_total = _to_float(weekly_progress_guidance.get("yearly_total_hours")) or 0.0
+    yearly_available = _to_float(weekly_progress_guidance.get("yearly_available_hours")) or 0.0
+    reported_so_far = _to_float(weekly_progress_guidance.get("reported_hours_so_far")) or 0.0
+    tracked_so_far = _to_float(weekly_progress_guidance.get("tracked_hours_so_far")) or reported_so_far
+    tracked_source = str(weekly_progress_guidance.get("tracked_source", "reported")).strip().lower()
+    elapsed_weeks = int(weekly_progress_guidance.get("elapsed_weeks") or 0)
+    worked_hpw = _to_float(weekly_progress_guidance.get("worked_hours_per_week")) or 0.0
+    worked_pct = _to_float(weekly_progress_guidance.get("worked_pct")) or 0.0
+    remaining_hours = _to_float(weekly_progress_guidance.get("remaining_hours")) or 0.0
+    weeks_remaining = int(weekly_progress_guidance.get("weeks_remaining") or 0)
+    remaining_hpw = _to_float(weekly_progress_guidance.get("remaining_hours_per_week"))
+    remaining_pct = _to_float(weekly_progress_guidance.get("remaining_pct"))
+
+    if weekly_reference_source == "config_week_reference":
+        basis_formula = (
+            f"100% = config.hours.workable_hours_per_week_reference_value = {ref:.1f} h/week."
+        )
+    elif weekly_reference_source == "year_total_div_46":
+        basis_formula = (
+            f"100% = yearly total hours / 46 = {yearly_total:.0f}/46 = {ref:.1f} h/week."
+        )
+    elif weekly_reference_source == "year_capacity_div_46":
+        basis_formula = (
+            f"100% = yearly available hours / 46 = {yearly_available:.0f}/46 = {ref:.1f} h/week (fallback)."
+        )
+    else:
+        elapsed_for_formula = max(elapsed_weeks, 1)
+        basis_formula = (
+            f"100% = average reported hours so far = {reported_so_far:.1f}/{elapsed_for_formula} = {ref:.1f} h/week."
+        )
+
+    if tracked_source == "billed":
+        progress_sentence = (
+            f"Up until today, {tracked_so_far:.1f} hours have been billed in {elapsed_weeks} weeks, "
+            f"averaging {worked_hpw:.1f} h/week ({worked_pct:.1f}%) [horizontal dotted line]."
+        )
+    else:
+        progress_sentence = (
+            f"Up until today, {tracked_so_far:.1f} hours have been reported in {elapsed_weeks} weeks, "
+            f"averaging {worked_hpw:.1f} h/week ({worked_pct:.1f}%) [horizontal dotted line]."
+        )
+
+    if remaining_pct is not None and remaining_hpw is not None and weeks_remaining > 0:
+        remaining_sentence = (
+            f"Spreading the remaining {remaining_hours:.1f} hours over the remaining {weeks_remaining} weeks, "
+            f"the projection is {remaining_hpw:.1f} h/week ({remaining_pct:.1f}%) for the remainder of the year "
+            "[horizontal dashed line]."
+        )
+        if worked_pct > remaining_pct:
+            comparison_sentence = (
+                f"Given that {worked_pct:.1f}% (up until now) is larger than {remaining_pct:.1f}% "
+                "(spread over remaining weeks), the remainder of the year can run at a lower weekly pace "
+                "than the average pace so far."
+            )
+        elif worked_pct < remaining_pct:
+            comparison_sentence = (
+                f"Given that {worked_pct:.1f}% (up until now) is smaller than {remaining_pct:.1f}% "
+                "(spread over remaining weeks), the remainder of the year requires a higher weekly pace "
+                "than the average pace so far."
+            )
+        else:
+            comparison_sentence = (
+                f"Given that {worked_pct:.1f}% (up until now) equals {remaining_pct:.1f}% "
+                "(spread over remaining weeks), the remainder of the year can continue at the same average pace."
+            )
+    else:
+        remaining_sentence = "No remaining weeks are available in the current year for a remainder projection."
+        comparison_sentence = "Comparison between worked-so-far and remainder projection percentages is not available."
+
+    return (
+        "<div class='weekly-guidance'>"
+        "<div><b>The percentage shown is based on the assumption that 100% equals "
+        f"{ref:.1f} hours per week.</b></div>"
+        f"<div class='weekly-guidance-formula'>{html.escape(basis_formula)}</div>"
+        f"<div>{html.escape(progress_sentence)}</div>"
+        f"<div>{html.escape(remaining_sentence)}</div>"
+        f"<div>{html.escape(comparison_sentence)}</div>"
+        "</div>"
+    )
+
+
 def _append_weekly_reference_note_to_titles(fig: go.Figure, note_text: str) -> None:
     if not note_text:
         return
     for ann in list(getattr(fig.layout, "annotations", []) or []):
         text = str(getattr(ann, "text", "") or "")
-        if "Reported time per week" in text or "Estimated magnitude per week" in text:
+        if (
+            "Billed hours per week" in text
+            or "Reported time per week" in text
+            or "Estimated magnitude per week" in text
+        ):
             if "Percent base:" in text:
                 continue
             ann.text = (
@@ -3516,12 +4044,33 @@ def _append_weekly_reference_note_to_titles(fig: go.Figure, note_text: str) -> N
             )
 
 
+def _ensure_subplot_title_annotation(fig: go.Figure, subplot_row: int, title_text: str) -> None:
+    if not title_text:
+        return
+    for ann in list(getattr(fig.layout, "annotations", []) or []):
+        text = str(getattr(ann, "text", "") or "")
+        if title_text in text:
+            return
+    fig.add_annotation(
+        text=f"<b>{html.escape(title_text)}</b>",
+        x=0,
+        xref="x domain",
+        y=1.18,
+        yref=axis_domain_ref("y", subplot_row),
+        showarrow=False,
+        align="left",
+        row=subplot_row,
+        col=1,
+    )
+
+
 def build_percentage_figure_from_hours(
     hours_fig: go.Figure,
     total_period_hours: Optional[float] = None,
     weekly_reference_hours: Optional[float] = None,
     weekly_reference_note: Optional[str] = None,
     show_weekly_reference_note_in_title: bool = False,
+    weekly_progress_guidance: Optional[Dict[str, Any]] = None,
 ) -> go.Figure:
     fig = go.Figure(hours_fig.to_dict())
 
@@ -3538,11 +4087,14 @@ def build_percentage_figure_from_hours(
     period_hours = float(total_period_hours) if total_period_hours is not None else None
     weekly_hours_ref = float(weekly_reference_hours) if weekly_reference_hours is not None else None
     denom_by_axis: Dict[str, float] = {}
+    axis_role_by_id: Dict[str, str] = {}
     for axis_id, plotted_total in totals_by_axis.items():
         yaxis_layout_key = _layout_axis_key(axis_id, "y")
         axis_obj = getattr(fig.layout, yaxis_layout_key, None)
         title_text = _axis_title_text(axis_obj)
         xaxis_id = xaxis_by_yaxis.get(axis_id, "x")
+        if _is_date_xaxis(fig, xaxis_id) and title_text.lower() == "hours":
+            axis_role_by_id[axis_id] = "reported_weekly"
         if weekly_hours_ref is not None and weekly_hours_ref > 0 and _is_date_xaxis(fig, xaxis_id):
             denom_by_axis[axis_id] = weekly_hours_ref
         elif period_hours is not None and period_hours > 0 and title_text.lower() == "hours":
@@ -3587,11 +4139,103 @@ def build_percentage_figure_from_hours(
         axis_obj.ticksuffix = "%"
         axis_obj.tickformat = ".0f"
         max_stack = _max_stacked_y_for_axis(fig, axis_id)
-        axis_obj.range = [0, (max_stack * 1.2) if max_stack > 0 else 100]
+        max_target = max_stack
+        if weekly_progress_guidance and axis_role_by_id.get(axis_id) == "reported_weekly":
+            worked_pct = _to_float(weekly_progress_guidance.get("worked_pct"))
+            remaining_pct = _to_float(weekly_progress_guidance.get("remaining_pct"))
+            if worked_pct is not None:
+                max_target = max(max_target, worked_pct)
+            if remaining_pct is not None:
+                max_target = max(max_target, remaining_pct)
+        axis_obj.range = [0, (max_target * 1.2) if max_target > 0 else 100]
+
+    if weekly_progress_guidance:
+        worked_pct = _to_float(weekly_progress_guidance.get("worked_pct"))
+        worked_x0 = weekly_progress_guidance.get("worked_x0")
+        worked_x1 = weekly_progress_guidance.get("worked_x1")
+        remaining_pct = _to_float(weekly_progress_guidance.get("remaining_pct"))
+        remaining_x0 = weekly_progress_guidance.get("remaining_x0")
+        remaining_x1 = weekly_progress_guidance.get("remaining_x1")
+        show_worked_line = bool(weekly_progress_guidance.get("show_worked_line", True))
+
+        for axis_id, role in axis_role_by_id.items():
+            if role != "reported_weekly":
+                continue
+            xaxis_id = xaxis_by_yaxis.get(axis_id, "x")
+            if show_worked_line and worked_pct is not None and worked_x0 is not None and worked_x1 is not None:
+                fig.add_shape(
+                    type="line",
+                    x0=pd.Timestamp(worked_x0),
+                    x1=pd.Timestamp(worked_x1),
+                    y0=worked_pct,
+                    y1=worked_pct,
+                    xref=xaxis_id,
+                    yref=axis_id,
+                    line=dict(color=BASE_BLUE, width=2, dash="dot"),
+                )
+            if (
+                remaining_pct is not None
+                and remaining_x0 is not None
+                and remaining_x1 is not None
+                and pd.Timestamp(remaining_x0) <= pd.Timestamp(remaining_x1)
+            ):
+                fig.add_shape(
+                    type="line",
+                    x0=pd.Timestamp(remaining_x0),
+                    x1=pd.Timestamp(remaining_x1),
+                    y0=remaining_pct,
+                    y1=remaining_pct,
+                    xref=xaxis_id,
+                    yref=axis_id,
+                    line=dict(color=BASE_RED, width=2, dash="dash"),
+                )
 
     if show_weekly_reference_note_in_title and weekly_reference_note:
         _append_weekly_reference_note_to_titles(fig, weekly_reference_note)
     return fig
+
+
+def render_plot_sections_html(
+    section_payloads: Optional[List[Dict[str, Any]]],
+    div_prefix: str,
+) -> str:
+    if not section_payloads:
+        return ""
+
+    blocks: List[str] = []
+    for idx, payload in enumerate(section_payloads):
+        fig = payload.get("figure")
+        if fig is None:
+            continue
+        title = str(payload.get("title", f"Section {idx + 1}"))
+        section_id = str(payload.get("section_id", f"section-{idx + 1}"))
+        foldable = bool(payload.get("foldable", True))
+        is_open = bool(payload.get("open", False))
+        extra_html = str(payload.get("extra_html") or "")
+
+        fig_div_id = f"{div_prefix}-{section_id}"
+        fig_html = pio.to_html(fig, include_plotlyjs=False, full_html=False, div_id=fig_div_id)
+        body_html = f"<div class='plot-section-body'>{extra_html}{fig_html}</div>"
+
+        if foldable:
+            open_attr = " open" if is_open else ""
+            blocks.append(
+                "<details class='plot-section'" + open_attr + ">"
+                f"<summary><span class='plot-section-title'>{html.escape(title)}</span></summary>"
+                f"{body_html}"
+                "</details>"
+            )
+        else:
+            blocks.append(
+                "<section class='plot-section plot-section-fixed'>"
+                f"<div class='plot-section-title'>{html.escape(title)}</div>"
+                f"{body_html}"
+                "</section>"
+            )
+
+    if not blocks:
+        return ""
+    return "<div class='plot-sections'>" + "".join(blocks) + "</div>"
 
 
 # ----------------------------
@@ -3624,8 +4268,11 @@ def export_tabbed_report(
     tables_html: str,
     hours_metrics_html: str,
     percentage_metrics_html: str,
+    percentage_explanation_html: str,
+    percentage_section_payloads: Optional[List[Dict[str, Any]]],
     sideways_bar_chart_html: str,
     nn_note: Optional[str],
+    nn_summary: Optional[Dict[str, Any]],
 ) -> Tuple[str, str, str]:
     lite_base_name = _strip_with_hours_suffix(base_name)
     with_hours_base_name = _ensure_with_hours_suffix(lite_base_name)
@@ -3650,8 +4297,11 @@ def export_tabbed_report(
         tables_html,
         hours_metrics_html,
         percentage_metrics_html,
+        percentage_explanation_html,
+        percentage_section_payloads,
         sideways_bar_chart_html,
         nn_note,
+        nn_summary,
     )
     write_tabbed_html(
         counts_fig,
@@ -3662,8 +4312,11 @@ def export_tabbed_report(
         tables_html,
         hours_metrics_html,
         percentage_metrics_html,
+        percentage_explanation_html,
+        percentage_section_payloads,
         sideways_bar_chart_html,
         nn_note,
+        nn_summary,
         enabled_tabs=("percentage", "projects"),
     )
 
@@ -4359,8 +5012,11 @@ def write_tabbed_html(
     tables_html: str,
     hours_metrics_html: str,
     percentage_metrics_html: str,
+    percentage_explanation_html: str,
+    percentage_section_payloads: Optional[List[Dict[str, Any]]],
     sideways_bar_chart_html: str,
     nn_note: Optional[str],
+    nn_summary: Optional[Dict[str, Any]],
     enabled_tabs: Tuple[str, ...] = ("hours", "percentage", "projects"),
 ) -> None:
     """Write a single-period HTML report with configurable tabs."""
@@ -4387,10 +5043,17 @@ def write_tabbed_html(
         if "percentage" in enabled_tabs_norm
         else ""
     )
+    percentage_sections_html = render_plot_sections_html(
+        percentage_section_payloads,
+        "percentage-section",
+    )
     plotly_cdn = _plotly_cdn_src()
 
-    title_text = html.escape(str(header_context.get("title_text", "Project Portfolio Overview")))
-    person_name_text = html.escape(str(header_context.get("person_name", "john doe")))
+    title_raw = str(header_context.get("title_text", "Project Portfolio Overview"))
+    person_name_raw = str(header_context.get("person_name", "john doe"))
+    title_text = html.escape(title_raw)
+    person_name_text = html.escape(person_name_raw)
+    header_summary_text = html.escape(f"{title_raw} ({person_name_raw})")
     export_date = html.escape(str(header_context.get("export_date", "")))
     period_label = html.escape(str(header_context.get("period_label", "")))
     period_range = html.escape(str(header_context.get("period_range", "")))
@@ -4404,16 +5067,8 @@ def write_tabbed_html(
         if company_logo_uri
         else ""
     )
-    branding_row_html = ""
-    if company_logo_img_html or profile_img_html:
-        branding_row_html = (
-            "<div class='branding-row'>"
-            f"{company_logo_img_html}"
-            f"{profile_img_html}"
-            "</div>"
-        )
     nn_note_html = f"<div class='nn-note'>{html.escape(nn_note)}</div>" if nn_note else ""
-    nn_sideways_bar_title_html = build_nn_sideways_bar_title_html()
+    nn_sideways_bar_title_html = build_nn_sideways_bar_title_html(nn_summary)
     sideways_bar_chart_block_html = (
         "<div class='nn-sideways-bar-block'>"
         f"{nn_sideways_bar_title_html}"
@@ -4422,6 +5077,15 @@ def write_tabbed_html(
         if sideways_bar_chart_html
         else ""
     )
+    header_nn_html = f"<div class='header-nn'>{sideways_bar_chart_block_html}</div>" if sideways_bar_chart_block_html else ""
+    header_branding_html = ""
+    if company_logo_img_html or profile_img_html:
+        header_branding_html = (
+            "<div class='header-branding'>"
+            f"{company_logo_img_html}"
+            f"{profile_img_html}"
+            "</div>"
+        )
 
     projects_html = tables_html or ""
 
@@ -4449,10 +5113,15 @@ def write_tabbed_html(
                 f"</div>"
             )
         elif t == "percentage":
+            percentage_panel_html = (
+                percentage_sections_html
+                if percentage_sections_html
+                else f"{percentage_html}{percentage_explanation_html}"
+            )
             tab_panels.append(
                 f"<div class=\"{panel_css}\" id=\"tab-percentage\">"
                 f"<div class='hours-metrics'>{percentage_metrics_html}</div>"
-                f"{percentage_html}"
+                f"{percentage_panel_html}"
                 f"</div>"
             )
         elif t == "projects":
@@ -4483,42 +5152,101 @@ def write_tabbed_html(
       padding-top: 8px;
       box-shadow: 0 2px 6px rgba(0,0,0,0.08);
     }}
+    .header-collapsible {{
+      border: 1px solid #DDD;
+      border-radius: 10px;
+      background: #FFF;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+      margin-bottom: 8px;
+    }}
+    .header-collapsible summary {{
+      cursor: pointer;
+      list-style: none;
+      outline: none;
+      padding: 8px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      color: #333;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      background: #F5F7FA;
+      border-bottom: 1px solid #E5E8ED;
+      user-select: none;
+    }}
+    .header-collapsible summary::-webkit-details-marker {{ display: none; }}
+    .header-collapsible summary::before {{
+      content: "▾";
+      color: #555;
+      font-weight: 700;
+    }}
+    .header-collapsible:not([open]) summary::before {{ content: "▸"; }}
+    .header-collapsible:not([open]) summary {{ border-bottom: 0; }}
+    .header-collapsible-body {{ padding: 0 10px 8px; }}
     .report-header {{
       display: flex;
-      justify-content: space-between;
-      gap: 24px;
+      gap: 6px;
+      align-items: center;
+      justify-content: center;
+      flex-wrap: nowrap;
+      padding: 10px 0 2px;
+      text-align: center;
+    }}
+    .header-left {{
+      flex: 0 1 340px;
+      min-width: 260px;
+      display: flex;
+      flex-direction: column;
       align-items: flex-start;
-      flex-wrap: wrap;
-      padding: 16px 0 8px;
+      justify-content: center;
+      text-align: left;
     }}
     .header-left h1 {{ margin: 0 0 6px 0; font-size: 26px; }}
     .header-left .subtitle {{ margin: 0 0 6px 0; font-size: 14px; color: #555; font-weight: 600; }}
-    .header-left .meta {{ font-size: 14px; color: #444; }}
-    .header-right {{
+    .header-left .meta {{ font-size: 14px; color: #444; text-align: left; }}
+    .header-left .nn-note {{ text-align: left; }}
+    .header-nn {{
       display: flex;
-      justify-content: flex-end;
-      align-items: flex-start;
+      flex: 0 1 520px;
+      min-width: 380px;
+      justify-content: flex-start;
+      align-items: center;
+    }}
+    .header-branding {{
+      display: flex;
+      flex: 0 0 auto;
+      min-width: 220px;
+      justify-content: center;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: nowrap;
     }}
     .nn-sideways-bar-block {{
       display: flex;
       flex-direction: column;
-      align-items: stretch;
-      gap: 4px;
-      min-width: 340px;
-      max-width: 620px;
-      width: min(620px, 72vw);
+      align-items: center;
+      gap: 2px;
+      min-width: 420px;
+      max-width: 540px;
+      width: min(540px, 52vw);
     }}
     .nn-sideways-bar-title-row {{
       display: flex;
       align-items: center;
-      gap: 6px;
+      justify-content: center;
+      gap: 4px;
     }}
     .nn-sideways-bar-title {{
       writing-mode: horizontal-tb;
       transform: none;
-      font-size: 12px;
+      font-size: 11px;
       color: #111;
-      line-height: 1.25;
+      line-height: 1.15;
+    }}
+    .nn-sideways-bar-subtitle {{
+      color: #444;
+      font-weight: 500;
     }}
     .nn-help-icon {{
       position: relative;
@@ -4566,21 +5294,34 @@ def write_tabbed_html(
       transform: translateY(0);
     }}
     .profile-img {{
-      width: 120px;
-      height: 120px;
+      width: 96px;
+      height: 96px;
       object-fit: cover;
       border-radius: 10px;
       border: 2px solid #EEE;
       background: #FFF;
     }}
-    .company-logo-img {{ height: 64px; object-fit: contain; }}
-    .branding-row {{
-      display: flex;
-      justify-content: flex-end;
-      align-items: center;
-      gap: 16px;
-      flex-wrap: wrap;
-      padding: 2px 0 10px;
+    .company-logo-img {{ height: 52px; max-width: 180px; object-fit: contain; }}
+    @media (max-width: 1200px) {{
+      .report-header {{
+        flex-wrap: wrap;
+        gap: 12px;
+      }}
+      .header-left {{
+        flex: 1 1 100%;
+      }}
+      .header-nn {{
+        flex: 1 1 100%;
+        min-width: 300px;
+      }}
+      .nn-sideways-bar-block {{
+        min-width: 300px;
+        width: min(540px, 94vw);
+      }}
+      .header-branding {{
+        min-width: 220px;
+        justify-content: flex-start;
+      }}
     }}
     .tabs {{
       display: flex;
@@ -4588,6 +5329,8 @@ def write_tabbed_html(
       margin: 4px 0 12px;
       padding-bottom: 12px;
       flex-wrap: wrap;
+      justify-content: center;
+      align-items: center;
     }}
     .tab-btn {{
       padding: 8px 16px;
@@ -4598,10 +5341,13 @@ def write_tabbed_html(
       font-weight: 600;
     }}
     .tab-btn.active {{
-      background: {BASE_BLUE};
-      border-color: {BASE_BLUE};
+      background: dodgerblue;
+      border-color: dodgerblue;
       color: #FFF;
     }}
+    .tabs-row1 .tab-btn.active {{ background: royalblue; border-color: royalblue; }}
+    .tabs-row2 .tab-btn.active {{ background: seagreen; border-color: seagreen; }}
+    .tabs-row3 .tab-btn.active {{ background: darkorange; border-color: darkorange; }}
     .tab-panel {{ display: none; }}
     .tab-panel.active {{ display: block; }}
     .hours-metrics {{ margin: 6px 0 16px; }}
@@ -4878,26 +5624,80 @@ def write_tabbed_html(
       background: #FFF;
     }}
     .nn-note {{ margin-top: 6px; font-size: 13px; color: #8A3B3B; }}
+    .plot-sections {{ display: flex; flex-direction: column; gap: 10px; }}
+    .plot-section {{
+      background: #FFF;
+      border: 1px solid #DDD;
+      border-radius: 10px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }}
+    .plot-section-title {{ font-size: 16px; font-weight: 700; }}
+    .plot-section-fixed {{ padding: 10px 12px 12px; }}
+    .plot-section-fixed .plot-section-title {{ margin-bottom: 8px; }}
+    .plot-section-body {{ min-height: 20px; }}
+    details.plot-section summary {{
+      cursor: pointer;
+      list-style: none;
+      outline: none;
+      padding: 10px 12px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }}
+    details.plot-section summary::-webkit-details-marker {{ display: none; }}
+    details.plot-section summary::before {{
+      content: "▸";
+      display: inline-block;
+      width: 1em;
+      color: {BASE_BLUE};
+      font-weight: 700;
+    }}
+    details.plot-section[open] summary::before {{ content: "▾"; }}
+    details.plot-section .plot-section-body {{ padding: 0 12px 12px; }}
+    .weekly-guidance {{
+      margin-top: 10px;
+      padding: 10px 12px;
+      background: #FFF;
+      border: 1px solid #DDD;
+      border-radius: 8px;
+      font-size: 13px;
+      color: #333;
+      line-height: 1.45;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }}
+    .weekly-guidance-formula {{
+      font-family: Consolas, "Courier New", monospace;
+      background: #F7F9FC;
+      border: 1px solid #E6EBF2;
+      border-radius: 6px;
+      padding: 6px 8px;
+      color: #223;
+    }}
   </style>
 </head>
 <body>
   <div class="page">
     <div class="sticky-header">
-      <div class="report-header">
-        <div class="header-left">
-          <h1>{title_text}</h1>
-          <div class="subtitle">{person_name_text}</div>
-          <div class="meta"><b>{period_label}</b> — {period_range}</div>
-          <div class="meta">Generated: {export_date}</div>
-          {nn_note_html}
+      <details class="header-collapsible" id="header-collapsible" open>
+        <summary>{header_summary_text}</summary>
+        <div class="header-collapsible-body">
+          <div class="report-header">
+            <div class="header-left">
+              <h1>{title_text}</h1>
+              <div class="subtitle">{person_name_text}</div>
+              <div class="meta"><b>{period_label}</b> — {period_range}</div>
+              <div class="meta">Generated: {export_date}</div>
+              {nn_note_html}
+            </div>
+            {header_nn_html}
+            {header_branding_html}
+          </div>
         </div>
-        <div class="header-right">
-          {sideways_bar_chart_block_html}
-        </div>
-      </div>
-      {branding_row_html}
+      </details>
 
-      <div class="tabs">
+      <div class="tabs tabs-row1">
         {tab_buttons_html}
       </div>
     </div>
@@ -4911,16 +5711,48 @@ def write_tabbed_html(
     var projectsSortDesc = true;
     var enabledTabs = {enabled_tabs_norm!r};
 
+    function resizePlotlyIn(rootEl) {{
+      if (!rootEl || !window.Plotly) {{
+        return;
+      }}
+      rootEl.querySelectorAll(".plotly-graph-div").forEach(function(plotEl) {{
+        Plotly.Plots.resize(plotEl);
+      }});
+    }}
+
+    function bindPlotSectionToggles() {{
+      document.querySelectorAll("details.plot-section").forEach(function(secEl) {{
+        secEl.addEventListener("toggle", function() {{
+          if (secEl.open) {{
+            resizePlotlyIn(secEl);
+          }}
+        }});
+      }});
+    }}
+
+    function bindHeaderToggle() {{
+      var headerToggle = document.getElementById("header-collapsible");
+      if (!headerToggle) {{
+        return;
+      }}
+      headerToggle.addEventListener("toggle", function() {{
+        if (!headerToggle.open) {{
+          return;
+        }}
+        resizePlotlyIn(headerToggle);
+        var activeTab = document.querySelector(".tab-panel.active");
+        if (activeTab) {{
+          resizePlotlyIn(activeTab);
+        }}
+      }});
+    }}
+
     function showTab(name) {{
       enabledTabs.forEach(function(t) {{
         document.getElementById("tab-" + t).classList.toggle("active", t === name);
         document.getElementById("btn-" + t).classList.toggle("active", t === name);
       }});
-      var figId = name + "-fig";
-      var figEl = document.getElementById(figId);
-      if (figEl && window.Plotly) {{
-        Plotly.Plots.resize(figEl);
-      }}
+      resizePlotlyIn(document.getElementById("tab-" + name));
       if (name === "projects") {{
         applyProjectsFilters();
       }}
@@ -5048,6 +5880,15 @@ def write_tabbed_html(
       }}
       refreshSortButtons();
     }}
+
+    window.addEventListener("load", function() {{
+      bindPlotSectionToggles();
+      bindHeaderToggle();
+      var activeTab = document.querySelector(".tab-panel.active");
+      if (activeTab) {{
+        resizePlotlyIn(activeTab);
+      }}
+    }});
   </script>
 </body>
 </html>
@@ -5067,8 +5908,11 @@ def write_multi_period_tabbed_html(
 ) -> None:
     """Write a combined multi-period HTML report with configurable tabs."""
     plotly_cdn = _plotly_cdn_src()
-    title_text = html.escape(str(header_context.get("title_text", "Project Portfolio Overview")))
-    person_name_text = html.escape(str(header_context.get("person_name", "john doe")))
+    title_raw = str(header_context.get("title_text", "Project Portfolio Overview"))
+    person_name_raw = str(header_context.get("person_name", "john doe"))
+    title_text = html.escape(title_raw)
+    person_name_text = html.escape(person_name_raw)
+    header_summary_text = html.escape(f"{title_raw} ({person_name_raw})")
     export_date = html.escape(str(header_context.get("export_date", "")))
 
     profile_uri = header_context.get("profile_data_uri")
@@ -5080,10 +5924,10 @@ def write_multi_period_tabbed_html(
         if company_logo_uri
         else ""
     )
-    branding_row_html = ""
+    header_branding_html = ""
     if company_logo_img_html or profile_img_html:
-        branding_row_html = (
-            "<div class='branding-row'>"
+        header_branding_html = (
+            "<div class='header-branding'>"
             f"{company_logo_img_html}"
             f"{profile_img_html}"
             "</div>"
@@ -5145,7 +5989,6 @@ def write_multi_period_tabbed_html(
     period_counts_panels_parts: List[str] = []
     period_hours_panels_parts: List[str] = []
     period_percentage_panels_parts: List[str] = []
-    nn_sideways_bar_title_html = build_nn_sideways_bar_title_html()
 
     group_labels: Dict[str, str] = {}
     if daily_period_ids:
@@ -5223,6 +6066,7 @@ def write_multi_period_tabbed_html(
 
         sideways_bar_chart_html = payload.get("sideways_bar_chart_html") or ""
         if sideways_bar_chart_html:
+            nn_sideways_bar_title_html = build_nn_sideways_bar_title_html(payload.get("nn_summary"))
             period_sideways_bar_chart_block_parts.append(
                 (
                     f"<div class=\"nn-sideways-bar-block period-nn{' active' if is_default else ''}\" "
@@ -5236,6 +6080,8 @@ def write_multi_period_tabbed_html(
         show_plots = bool(payload.get("show_plots", True))
         hours_metrics_html = payload.get("hours_metrics_html") or ""
         percentage_metrics_html = payload.get("percentage_metrics_html") or hours_metrics_html
+        percentage_explanation_html = payload.get("percentage_explanation_html") or ""
+        percentage_section_payloads = payload.get("percentage_section_payloads")
         table_only_html = payload.get("table_only_html") or percentage_metrics_html or hours_metrics_html
 
         if show_plots:
@@ -5248,10 +6094,15 @@ def write_multi_period_tabbed_html(
             counts_html = pio.to_html(counts_fig, include_plotlyjs=False, full_html=False, div_id=counts_div_id)
             hours_html = pio.to_html(hours_fig, include_plotlyjs=False, full_html=False, div_id=hours_div_id)
             percentage_html = pio.to_html(percentage_fig, include_plotlyjs=False, full_html=False, div_id=percentage_div_id)
+            percentage_sections_html = render_plot_sections_html(
+                percentage_section_payloads,
+                f"percentage-section-{period_id}",
+            )
         else:
             counts_html = f"<div class=\"hours-metrics\">{table_only_html}</div>"
             hours_html = ""
             percentage_html = ""
+            percentage_sections_html = ""
 
         period_counts_panels_parts.append(
             (
@@ -5273,7 +6124,7 @@ def write_multi_period_tabbed_html(
                 f"<div class=\"period-panel{' active' if is_default else ''}\" "
                 f"id=\"period-percentage-{period_id}\">"
                 f"<div class=\"hours-metrics\">{percentage_metrics_html}</div>"
-                f"{percentage_html}"
+                f"{percentage_sections_html if percentage_sections_html else (percentage_html + percentage_explanation_html)}"
                 "</div>"
             )
         )
@@ -5323,31 +6174,67 @@ def write_multi_period_tabbed_html(
     body {{ font-family: "Segoe UI", Tahoma, sans-serif; margin: 0; background: #FAFAFA; color: #111; }}
     .page {{ padding: 24px 28px 40px; }}
     .sticky-header {{ position: sticky; top: 0; z-index: 50; background: #FAFAFA; padding-top: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.08); }}
-    .report-header {{ display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; flex-wrap: wrap; padding: 12px 0 4px; }}
+    .header-collapsible {{
+      border: 1px solid #DDD;
+      border-radius: 10px;
+      background: #FFF;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+      margin-bottom: 8px;
+    }}
+    .header-collapsible summary {{
+      cursor: pointer;
+      list-style: none;
+      outline: none;
+      padding: 8px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      color: #333;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      background: #F5F7FA;
+      border-bottom: 1px solid #E5E8ED;
+      user-select: none;
+    }}
+    .header-collapsible summary::-webkit-details-marker {{ display: none; }}
+    .header-collapsible summary::before {{ content: "▾"; color: #555; font-weight: 700; }}
+    .header-collapsible:not([open]) summary::before {{ content: "▸"; }}
+    .header-collapsible:not([open]) summary {{ border-bottom: 0; }}
+    .header-collapsible-body {{ padding: 0 10px 8px; }}
+    .report-header {{ display: flex; gap: 6px; align-items: center; justify-content: center; flex-wrap: nowrap; padding: 10px 0 2px; text-align: center; }}
+    .header-left {{ flex: 0 1 340px; min-width: 260px; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; text-align: left; }}
     .header-left h1 {{ margin: 0 0 6px 0; font-size: 26px; }}
     .header-left .subtitle {{ margin: 0 0 6px 0; font-size: 14px; color: #555; font-weight: 600; }}
-    .header-left .meta {{ font-size: 14px; color: #444; }}
-    .header-right {{ display: flex; justify-content: flex-end; align-items: flex-start; }}
+    .header-left .meta {{ font-size: 14px; color: #444; text-align: left; }}
+    .header-left .nn-note {{ text-align: left; }}
+    .header-nn {{ display: flex; flex: 0 1 520px; min-width: 380px; justify-content: flex-start; align-items: center; }}
+    .header-branding {{ display: flex; flex: 0 0 auto; min-width: 220px; justify-content: center; align-items: center; gap: 8px; flex-wrap: nowrap; }}
     .nn-sideways-bar-block {{
       display: flex;
       flex-direction: column;
-      align-items: stretch;
-      gap: 4px;
-      min-width: 340px;
-      max-width: 620px;
-      width: min(620px, 72vw);
+      align-items: center;
+      gap: 2px;
+      min-width: 420px;
+      max-width: 540px;
+      width: min(540px, 52vw);
     }}
     .nn-sideways-bar-title-row {{
       display: flex;
       align-items: center;
-      gap: 6px;
+      gap: 4px;
+      justify-content: center;
     }}
     .nn-sideways-bar-title {{
       writing-mode: horizontal-tb;
       transform: none;
-      font-size: 12px;
+      font-size: 11px;
       color: #111;
-      line-height: 1.25;
+      line-height: 1.15;
+    }}
+    .nn-sideways-bar-subtitle {{
+      color: #444;
+      font-weight: 500;
     }}
     .nn-help-icon {{
       position: relative;
@@ -5394,10 +6281,16 @@ def write_multi_period_tabbed_html(
       opacity: 1;
       transform: translateY(0);
     }}
-    .profile-img {{ width: 120px; height: 120px; object-fit: cover; border-radius: 10px; border: 2px solid #EEE; background: #FFF; }}
-    .company-logo-img {{ height: 64px; object-fit: contain; }}
-    .branding-row {{ display: flex; justify-content: flex-end; align-items: center; gap: 16px; flex-wrap: wrap; padding: 2px 0 8px; }}
-    .tabs {{ display: flex; gap: 8px; margin: 2px 0 8px; padding-bottom: 8px; flex-wrap: wrap; }}
+    .profile-img {{ width: 96px; height: 96px; object-fit: cover; border-radius: 10px; border: 2px solid #EEE; background: #FFF; }}
+    .company-logo-img {{ height: 52px; max-width: 180px; object-fit: contain; }}
+    @media (max-width: 1200px) {{
+      .report-header {{ flex-wrap: wrap; gap: 12px; }}
+      .header-left {{ flex: 1 1 100%; }}
+      .header-nn {{ flex: 1 1 100%; min-width: 300px; }}
+      .nn-sideways-bar-block {{ min-width: 300px; width: min(540px, 94vw); }}
+      .header-branding {{ min-width: 220px; justify-content: flex-start; }}
+    }}
+    .tabs {{ display: flex; gap: 8px; margin: 2px 0 8px; padding-bottom: 8px; flex-wrap: wrap; justify-content: center; align-items: center; }}
     .day-tabs {{ display: none; align-items: center; gap: 8px; }}
     .day-tabs.active {{ display: flex; }}
     .day-tabs label {{ font-size: 13px; color: #444; font-weight: 600; }}
@@ -5406,7 +6299,10 @@ def write_multi_period_tabbed_html(
     .month-tabs.active {{ display: flex; }}
     .tab-btn {{ padding: 8px 16px; border: 1px solid #CCC; border-radius: 6px; background: #FFF; cursor: pointer; font-weight: 600; }}
     .tab-btn.month-btn {{ padding: 6px 12px; font-size: 13px; }}
-    .tab-btn.active {{ background: {BASE_BLUE}; border-color: {BASE_BLUE}; color: #FFF; }}
+    .tab-btn.active {{ background: dodgerblue; border-color: dodgerblue; color: #FFF; }}
+    .tabs-row1 .tab-btn.active {{ background: royalblue; border-color: royalblue; }}
+    .tabs-row2 .tab-btn.active {{ background: seagreen; border-color: seagreen; }}
+    .tabs-row3 .tab-btn.active {{ background: darkorange; border-color: darkorange; }}
     .tab-panel {{ display: none; }}
     .tab-panel.active {{ display: block; }}
     .period-panel {{ display: none; }}
@@ -5576,41 +6472,59 @@ def write_multi_period_tabbed_html(
     .deliverable-fn {{ font-weight: 700; margin: 8px 0 6px; }}
     .deliverables-text pre {{ white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow: auto; background: #FAFAFA; border: 1px solid #EEE; border-radius: 8px; padding: 8px; margin: 0; font-size: 12px; }}
     .deliverables-images img {{ max-width: 420px; height: auto; border-radius: 8px; border: 1px solid #EEE; background: #FFF; }}
+    .plot-sections {{ display: flex; flex-direction: column; gap: 10px; }}
+    .plot-section {{ background: #FFF; border: 1px solid #DDD; border-radius: 10px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }}
+    .plot-section-title {{ font-size: 16px; font-weight: 700; }}
+    .plot-section-fixed {{ padding: 10px 12px 12px; }}
+    .plot-section-fixed .plot-section-title {{ margin-bottom: 8px; }}
+    .plot-section-body {{ min-height: 20px; }}
+    details.plot-section summary {{ cursor: pointer; list-style: none; outline: none; padding: 10px 12px; display: flex; align-items: center; gap: 6px; }}
+    details.plot-section summary::-webkit-details-marker {{ display: none; }}
+    details.plot-section summary::before {{ content: "▸"; display: inline-block; width: 1em; color: {BASE_BLUE}; font-weight: 700; }}
+    details.plot-section[open] summary::before {{ content: "▾"; }}
+    details.plot-section .plot-section-body {{ padding: 0 12px 12px; }}
+    .weekly-guidance {{ margin-top: 10px; padding: 10px 12px; background: #FFF; border: 1px solid #DDD; border-radius: 8px; font-size: 13px; color: #333; line-height: 1.45; display: flex; flex-direction: column; gap: 6px; }}
+    .weekly-guidance-formula {{ font-family: Consolas, "Courier New", monospace; background: #F7F9FC; border: 1px solid #E6EBF2; border-radius: 6px; padding: 6px 8px; color: #223; }}
   </style>
 </head>
 <body>
   <div class="page">
     <div class="sticky-header">
-      <div class="report-header">
-        <div class="header-left">
-          <h1>{title_text}</h1>
-          <div class="subtitle">{person_name_text}</div>
-          <div class="meta">{period_meta_html}</div>
-          <div class="meta">Generated: {export_date}</div>
-          {period_note_html}
+      <details class="header-collapsible" id="header-collapsible" open>
+        <summary>{header_summary_text}</summary>
+        <div class="header-collapsible-body">
+          <div class="report-header">
+            <div class="header-left">
+              <h1>{title_text}</h1>
+              <div class="subtitle">{person_name_text}</div>
+              <div class="meta">{period_meta_html}</div>
+              <div class="meta">Generated: {export_date}</div>
+              {period_note_html}
+            </div>
+            <div class="header-nn">
+              {sideways_bar_chart_blocks_html}
+            </div>
+            {header_branding_html}
+          </div>
         </div>
-        <div class="header-right">
-          {sideways_bar_chart_blocks_html}
-        </div>
-      </div>
-      {branding_row_html}
+      </details>
 
-      <div class="tabs">
+      <div class="tabs tabs-row1">
         {tab_buttons_html}
       </div>
 
       <div id="period-controls">
         <div id="period-controls-inner">
-          <div class="tabs">
+          <div class="tabs tabs-row2">
             {period_group_buttons_html}
           </div>
-          <div class="tabs day-tabs{' active' if default_group == 'daily' else ''}" id="day-tabs">
+          <div class="tabs tabs-row3 day-tabs{' active' if default_group == 'daily' else ''}" id="day-tabs">
             <label for="day-select">Day</label>
             <select id="day-select" onchange="showDay(this.value)">
               {day_select_html}
             </select>
           </div>
-          <div class="tabs month-tabs{' active' if default_group == 'monthly' else ''}" id="month-tabs">
+          <div class="tabs tabs-row3 month-tabs{' active' if default_group == 'monthly' else ''}" id="month-tabs">
             {month_buttons_html}
           </div>
         </div>
@@ -5623,16 +6537,49 @@ def write_multi_period_tabbed_html(
     {tab_panels_html}
   </div>
 
-		  <script>
-		    var currentTab = "{default_tab}";
-		    var enabledTabs = {enabled_tabs_norm!r};
-		    var currentPeriodId = "{default_period_id}";
+  <script>
+    var currentTab = "{default_tab}";
+    var enabledTabs = {enabled_tabs_norm!r};
+    var currentPeriodId = "{default_period_id}";
 		    var currentDailyId = "{default_day_id}";
 		    var dailyPeriodIds = {daily_period_ids!r};
 		    var currentMonthlyId = "{default_month_id}";
 		    var projectsStatusFilter = "";
-		    var projectsSortKey = "last_updated";
-		    var projectsSortDesc = true;
+    var projectsSortKey = "last_updated";
+    var projectsSortDesc = true;
+
+    function resizePlotlyIn(rootEl) {{
+      if (!rootEl || !window.Plotly) {{
+        return;
+      }}
+      rootEl.querySelectorAll(".plotly-graph-div").forEach(function(plotEl) {{
+        Plotly.Plots.resize(plotEl);
+      }});
+    }}
+
+    function bindPlotSectionToggles() {{
+      document.querySelectorAll("details.plot-section").forEach(function(secEl) {{
+        secEl.addEventListener("toggle", function() {{
+          if (secEl.open) {{
+            resizePlotlyIn(secEl);
+          }}
+        }});
+      }});
+    }}
+
+    function bindHeaderToggle() {{
+      var headerToggle = document.getElementById("header-collapsible");
+      if (!headerToggle) {{
+        return;
+      }}
+      headerToggle.addEventListener("toggle", function() {{
+        if (!headerToggle.open) {{
+          return;
+        }}
+        resizePlotlyIn(headerToggle);
+        updateView();
+      }});
+    }}
 
     function showTab(name) {{
       currentTab = name;
@@ -5880,10 +6827,9 @@ def write_multi_period_tabbed_html(
         var sidewaysBarEl = document.getElementById("nn-sideways-bar-block-" + currentPeriodId);
         if (sidewaysBarEl) sidewaysBarEl.classList.add("active");
 
-        var figId = currentTab + "-fig-" + currentPeriodId;
-        var figEl = document.getElementById(figId);
-        if (figEl && window.Plotly) {{
-          Plotly.Plots.resize(figEl);
+        var activePanel = document.getElementById("period-" + currentTab + "-" + currentPeriodId);
+        if (activePanel) {{
+          resizePlotlyIn(activePanel);
         }}
 
         var sidewaysBarFigEl = document.getElementById("nn-sideways-bar-" + currentPeriodId);
@@ -5896,6 +6842,8 @@ def write_multi_period_tabbed_html(
     }}
 
     window.addEventListener("load", function() {{
+      bindPlotSectionToggles();
+      bindHeaderToggle();
       updateView();
     }});
   </script>
@@ -6107,11 +7055,12 @@ def generate_reports(report_type: str, asof_date: date) -> None:
                 time_entries_filtered,
                 show_percentage=True,
                 include_total_in_note=True,
+                foldable=False,
             )
 
             period_payloads[period_id] = dict(
                 label=period_label,
-                period_range=f"{period_start.isoformat()} to {period_end.isoformat()}",
+                period_range=format_period_range_compact(period_start, period_end),
                 counts_fig=go.Figure(),
                 hours_fig=go.Figure(),
                 percentage_fig=go.Figure(),
@@ -6119,8 +7068,11 @@ def generate_reports(report_type: str, asof_date: date) -> None:
                 table_only_html=table_only_html,
                 hours_metrics_html=table_only_html,
                 percentage_metrics_html=table_only_html,
+                percentage_explanation_html="",
+                percentage_section_payloads=[],
                 sideways_bar_chart_html="",
                 nn_note=nn_note,
+                nn_summary=None,
             )
 
         for rtype in ("weekly", "biweekly", "yearly"):
@@ -6189,28 +7141,54 @@ def generate_reports(report_type: str, asof_date: date) -> None:
             weekly_ref, weekly_ref_source, weekly_ref_note = compute_weekly_reference_hours(
                 time_entries_df, period_end, nn_summary
             )
+            weekly_progress_guidance: Optional[Dict[str, Any]] = None
+            percentage_explanation_html = ""
+            if rtype == "yearly":
+                weekly_progress_guidance = compute_weekly_progress_guidance(
+                    time_entries_df,
+                    period_end,
+                    nn_summary,
+                    weekly_ref,
+                )
+                percentage_explanation_html = build_weekly_progress_explanation_html(
+                    weekly_progress_guidance,
+                    weekly_ref_source,
+                )
             percentage_fig = build_percentage_figure_from_hours(
                 hours_fig,
                 total_period_hours=total_period_hours,
                 weekly_reference_hours=weekly_ref,
                 weekly_reference_note=weekly_ref_note,
-                show_weekly_reference_note_in_title=weekly_ref_source in (
-                    "config_week_reference",
-                    "year_total_div_46",
-                    "year_capacity_div_46",
+                show_weekly_reference_note_in_title=False,
+                weekly_progress_guidance=weekly_progress_guidance,
+            )
+            percentage_section_payloads = build_percentage_section_payloads(
+                build_hours_section_figures(
+                    projects_df,
+                    time_entries_filtered,
+                    period_start,
+                    period_end,
+                    rtype,
                 ),
+                total_period_hours=total_period_hours,
+                weekly_reference_hours=weekly_ref,
+                weekly_progress_guidance=weekly_progress_guidance,
+                timeline_explanation_html=percentage_explanation_html,
             )
 
             period_payloads[rtype] = dict(
                 label=period_label,
-                period_range=f"{period_start.isoformat()} to {period_end.isoformat()}",
+                period_range=format_period_range_compact(period_start, period_end),
                 counts_fig=counts_fig,
                 hours_fig=hours_fig,
                 percentage_fig=percentage_fig,
                 hours_metrics_html=hours_metrics_html,
                 percentage_metrics_html=percentage_metrics_html,
+                percentage_explanation_html=percentage_explanation_html,
+                percentage_section_payloads=percentage_section_payloads,
                 sideways_bar_chart_html=sideways_bar_chart_html,
                 nn_note=nn_note,
+                nn_summary=nn_summary,
             )
 
         for month_info in list_completed_month_periods(asof_date, time_entries_df):
@@ -6272,28 +7250,51 @@ def generate_reports(report_type: str, asof_date: date) -> None:
             weekly_ref, weekly_ref_source, weekly_ref_note = compute_weekly_reference_hours(
                 time_entries_df, period_end, nn_summary
             )
+            weekly_progress_guidance = compute_monthly_average_guidance(
+                time_entries_filtered,
+                period_start,
+                period_end,
+                weekly_ref,
+                nn_summary=nn_summary,
+            )
+            percentage_explanation_html = build_monthly_average_explanation_html(
+                weekly_progress_guidance,
+            )
             percentage_fig = build_percentage_figure_from_hours(
                 hours_fig,
                 total_period_hours=total_period_hours,
                 weekly_reference_hours=weekly_ref,
                 weekly_reference_note=weekly_ref_note,
-                show_weekly_reference_note_in_title=weekly_ref_source in (
-                    "config_week_reference",
-                    "year_total_div_46",
-                    "year_capacity_div_46",
+                show_weekly_reference_note_in_title=False,
+                weekly_progress_guidance=weekly_progress_guidance,
+            )
+            percentage_section_payloads = build_percentage_section_payloads(
+                build_hours_section_figures(
+                    projects_df,
+                    time_entries_filtered,
+                    period_start,
+                    period_end,
+                    "monthly",
                 ),
+                total_period_hours=total_period_hours,
+                weekly_reference_hours=weekly_ref,
+                weekly_progress_guidance=weekly_progress_guidance,
+                timeline_explanation_html=percentage_explanation_html,
             )
 
             period_payloads[period_id] = dict(
                 label=period_label,
-                period_range=f"{period_start.isoformat()} to {period_end.isoformat()}",
+                period_range=format_period_range_compact(period_start, period_end),
                 counts_fig=counts_fig,
                 hours_fig=hours_fig,
                 percentage_fig=percentage_fig,
                 hours_metrics_html=hours_metrics_html,
                 percentage_metrics_html=percentage_metrics_html,
+                percentage_explanation_html=percentage_explanation_html,
+                percentage_section_payloads=percentage_section_payloads,
                 sideways_bar_chart_html=sideways_bar_chart_html,
                 nn_note=nn_note,
+                nn_summary=nn_summary,
             )
 
         header_context = dict(
@@ -6338,6 +7339,8 @@ def generate_reports(report_type: str, asof_date: date) -> None:
     sideways_bar_chart_html = ""
     hours_metrics_html = ""
     percentage_metrics_html = ""
+    percentage_explanation_html = ""
+    percentage_section_payloads: List[Dict[str, Any]] = []
     if nn_df is None:
         nn_note = nn_status
     else:
@@ -6361,6 +7364,7 @@ def generate_reports(report_type: str, asof_date: date) -> None:
             time_entries_filtered,
             show_percentage=True,
             include_total_in_note=True,
+            foldable=False,
         )
         hours_metrics_html = table_only_html
         percentage_metrics_html = table_only_html
@@ -6377,6 +7381,8 @@ def generate_reports(report_type: str, asof_date: date) -> None:
         hours_fig = go.Figure()
         percentage_fig = go.Figure()
         sideways_bar_chart_html = ""
+        percentage_explanation_html = ""
+        percentage_section_payloads = []
     else:
         counts_fig = build_counts_figure(
             projects_for_counts,
@@ -6405,19 +7411,53 @@ def generate_reports(report_type: str, asof_date: date) -> None:
         weekly_ref, weekly_ref_source, weekly_ref_note = compute_weekly_reference_hours(
             time_entries_df, period_end, nn_summary
         )
+        weekly_progress_guidance: Optional[Dict[str, Any]] = None
+        percentage_explanation_html = ""
+        if rtype == "yearly":
+            weekly_progress_guidance = compute_weekly_progress_guidance(
+                time_entries_df,
+                period_end,
+                nn_summary,
+                weekly_ref,
+            )
+            percentage_explanation_html = build_weekly_progress_explanation_html(
+                weekly_progress_guidance,
+                weekly_ref_source,
+            )
+        elif rtype == "monthly":
+            weekly_progress_guidance = compute_monthly_average_guidance(
+                time_entries_filtered,
+                period_start,
+                period_end,
+                weekly_ref,
+                nn_summary=nn_summary,
+            )
+            percentage_explanation_html = build_monthly_average_explanation_html(
+                weekly_progress_guidance,
+            )
         percentage_fig = build_percentage_figure_from_hours(
             hours_fig,
             total_period_hours=total_period_hours,
             weekly_reference_hours=weekly_ref,
             weekly_reference_note=weekly_ref_note,
-            show_weekly_reference_note_in_title=weekly_ref_source in (
-                "config_week_reference",
-                "year_total_div_46",
-                "year_capacity_div_46",
+            show_weekly_reference_note_in_title=False,
+            weekly_progress_guidance=weekly_progress_guidance,
+        )
+        percentage_section_payloads = build_percentage_section_payloads(
+            build_hours_section_figures(
+                projects_df,
+                time_entries_filtered,
+                period_start,
+                period_end,
+                rtype,
             ),
+            total_period_hours=total_period_hours,
+            weekly_reference_hours=weekly_ref,
+            weekly_progress_guidance=weekly_progress_guidance,
+            timeline_explanation_html=percentage_explanation_html,
         )
 
-    period_range = f"{period_start.isoformat()} to {period_end.isoformat()}"
+    period_range = format_period_range_compact(period_start, period_end)
     header_context = dict(
         title_text=REPORT_TITLE,
         person_name=PERSON_NAME,
@@ -6456,8 +7496,11 @@ def generate_reports(report_type: str, asof_date: date) -> None:
         projects_page_html,
         hours_metrics_html,
         percentage_metrics_html,
+        percentage_explanation_html,
+        percentage_section_payloads,
         sideways_bar_chart_html,
         nn_note,
+        nn_summary,
     )
 
     print(f"Generated {rtype} report: {period_range} -> {html_path}")
