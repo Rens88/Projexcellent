@@ -819,6 +819,26 @@ def format_period_range_compact(period_start: date, period_end: date) -> str:
     )
 
 
+def compute_weighted_week_equivalents(period_start: date, period_end: date) -> float:
+    """
+    Return week-equivalents for a date range by weighting each overlapping ISO week
+    by its overlap fraction. This keeps partial weeks proportional.
+    """
+    if period_end < period_start:
+        return 0.0
+    total = 0.0
+    week_start = period_start - timedelta(days=period_start.weekday())
+    while week_start <= period_end:
+        week_end = week_start + timedelta(days=6)
+        overlap_start = max(period_start, week_start)
+        overlap_end = min(period_end, week_end)
+        if overlap_end >= overlap_start:
+            overlap_days = (overlap_end - overlap_start).days + 1
+            total += float(overlap_days) / 7.0
+        week_start += timedelta(days=7)
+    return total
+
+
 def list_completed_month_periods(asof_date: date, time_entries_df: Optional[pd.DataFrame] = None) -> List[Dict[str, Any]]:
     """
     Returns month periods (start/end/key/label), newest-first, including the current month through `asof_date`.
@@ -1741,12 +1761,28 @@ def build_nn_sideways_bar_chart_html(nn_summary: Optional[Dict[str, Any]], div_i
     avg_weekly_remaining_hours = _to_float(nn_summary.get("avg_weekly_remaining_hours"))
     completed_weeks = int(_to_float(nn_summary.get("completed_weeks")) or 0)
     remaining_weeks = int(_to_float(nn_summary.get("remaining_weeks")) or 0)
+    reference_date_value = nn_summary.get("reference_date")
+    reference_date: Optional[date] = None
+    if reference_date_value is not None:
+        try:
+            reference_date = pd.Timestamp(reference_date_value).date()
+        except Exception:
+            reference_date = None
     if total_calendar_workdays is None or total_calendar_workdays <= 0:
         total_calendar_workdays = total_workable_days
     if total_workable_days is None or total_workable_days <= 0:
         total_workable_days = (capacity_hours / 8.0) if capacity_hours > 0 else 0.0
     if total_calendar_workdays is None or total_calendar_workdays <= 0:
         total_calendar_workdays = total_workable_days
+
+    def _clamp_height_scale(scale: Optional[float]) -> float:
+        if scale is None:
+            return 1.0
+        try:
+            raw = float(scale)
+        except (TypeError, ValueError):
+            return 1.0
+        return max(0.40, min(raw, 2.4))
 
     base_block_height = 0.62
     remaining_height_scale = 1.0
@@ -1758,7 +1794,7 @@ def build_nn_sideways_bar_chart_html(nn_summary: Optional[Dict[str, Any]], div_i
     ):
         remaining_height_scale = avg_weekly_remaining_hours / avg_weekly_reported_hours
     # Keep bars readable while preserving directional signal (throttle vs increase).
-    remaining_height_scale = max(0.40, min(remaining_height_scale, 1.8))
+    remaining_height_scale = _clamp_height_scale(remaining_height_scale)
 
     total_segment_hours = 0.0
     cumulative_hours = 0.0
@@ -1849,25 +1885,75 @@ def build_nn_sideways_bar_chart_html(nn_summary: Optional[Dict[str, Any]], div_i
         else:
             month_hours_label = "Billed in month"
 
+        month_num = int(_to_float(segment.get("month_num")) or 0)
+        month_year = None
+        try:
+            month_ts = pd.to_datetime(str(segment.get("month_name", "")).strip(), errors="coerce")
+            if not pd.isna(month_ts):
+                month_year = int(month_ts.year)
+                if month_num <= 0:
+                    month_num = int(month_ts.month)
+        except Exception:
+            month_year = None
+        if month_year is None:
+            month_year = reference_date.year if reference_date is not None else date.today().year
+
+        segment_weekly_hours: Optional[float] = None
+        if 1 <= month_num <= 12 and month_year > 0:
+            period_start = date(month_year, month_num, 1)
+            period_end = (pd.Timestamp(period_start) + pd.offsets.MonthEnd(0)).date()
+            if phase == "current_billed" and reference_date and reference_date.year == month_year and reference_date.month == month_num:
+                period_end = min(period_end, reference_date)
+            elif phase == "current_expected" and reference_date and reference_date.year == month_year and reference_date.month == month_num:
+                period_start = min(max(reference_date + timedelta(days=1), period_start), period_end)
+
+            weighted_weeks = compute_weighted_week_equivalents(period_start, period_end)
+            if weighted_weeks <= 0 and segment_calendar_workdays > 0:
+                weighted_weeks = segment_calendar_workdays / 5.0
+            if weighted_weeks > 0:
+                segment_weekly_hours = seg_hours / weighted_weeks
+
         remaining_after_block = max(nn_total_hours - cumulative_hours, 0.0)
         if is_remaining_phase:
             if avg_weekly_remaining_hours is not None and remaining_weeks > 0:
-                weekly_line = (
-                    f"Available (remaining {remaining_weeks} weeks): "
-                    f"{avg_weekly_remaining_hours:.1f} h/week"
-                )
+                if avg_weekly_reported_hours is not None and avg_weekly_reported_hours > 0:
+                    remaining_pct_of_base = avg_weekly_remaining_hours * 100.0 / avg_weekly_reported_hours
+                    weekly_line = (
+                        f"Available (remaining {remaining_weeks} weeks): "
+                        f"{avg_weekly_remaining_hours:.1f} h/week ({remaining_pct_of_base:.0f}% of 100%)"
+                    )
+                else:
+                    weekly_line = (
+                        f"Available (remaining {remaining_weeks} weeks): "
+                        f"{avg_weekly_remaining_hours:.1f} h/week"
+                    )
             else:
                 weekly_line = "Available (remaining weeks): n/a"
         else:
-            if avg_weekly_reported_hours is not None and completed_weeks > 0:
-                weekly_line = (
-                    f"Reported (completed {completed_weeks} weeks): "
-                    f"{avg_weekly_reported_hours:.1f} h/week"
-                )
+            if segment_weekly_hours is not None:
+                if avg_weekly_reported_hours is not None and avg_weekly_reported_hours > 0:
+                    segment_pct_of_base = segment_weekly_hours * 100.0 / avg_weekly_reported_hours
+                    weekly_line = (
+                        f"Billed pace this period (weighted): {segment_weekly_hours:.1f} h/week "
+                        f"({segment_pct_of_base:.0f}% of 100%)"
+                    )
+                else:
+                    weekly_line = f"Billed pace this period (weighted): {segment_weekly_hours:.1f} h/week"
+            elif avg_weekly_reported_hours is not None and completed_weeks > 0:
+                weekly_line = f"Reported (completed {completed_weeks} weeks): {avg_weekly_reported_hours:.1f} h/week"
             else:
                 weekly_line = "Reported (completed weeks): n/a"
 
-        block_height = base_block_height * (remaining_height_scale if is_remaining_phase else 1.0)
+        completed_height_scale = 1.0
+        if (
+            not is_remaining_phase
+            and segment_weekly_hours is not None
+            and avg_weekly_reported_hours is not None
+            and avg_weekly_reported_hours > 0
+        ):
+            completed_height_scale = segment_weekly_hours / avg_weekly_reported_hours
+        completed_height_scale = _clamp_height_scale(completed_height_scale)
+        block_height = base_block_height * (remaining_height_scale if is_remaining_phase else completed_height_scale)
 
         fig.add_trace(
             go.Bar(
@@ -1970,11 +2056,16 @@ def build_nn_sideways_bar_title_html(nn_summary: Optional[Dict[str, Any]] = None
 
     if avg_weekly_reported_hours is not None and completed_weeks > 0:
         up_to_now_line = (
-            f"Height up to now = 100%, based on {avg_weekly_reported_hours:.1f} h/week "
-            f"reported across {completed_weeks} completed weeks."
+            f"100% height = average up-until-now pace: {avg_weekly_reported_hours:.1f} h/week "
+            f"across {completed_weeks} completed weeks."
         )
     else:
-        up_to_now_line = "Height up to now = 100%, based on average reported hours over completed weeks."
+        up_to_now_line = "100% height = average up-until-now pace over completed weeks."
+
+    completed_blocks_line = (
+        "Completed (blue) blocks are scaled per period: billed h/week for that block, "
+        "using weighted week-equivalents so partial weeks are proportional."
+    )
 
     if avg_weekly_remaining_hours is not None and remaining_weeks > 0:
         if remaining_weekly_vs_reported_pct is not None:
@@ -1993,6 +2084,7 @@ def build_nn_sideways_bar_title_html(nn_summary: Optional[Dict[str, Any]] = None
     help_lines = [
         f"Width shows monthly billed/expected {_company_label_short()} hours against yearly total (x-axis 0% to 100%).",
         up_to_now_line,
+        completed_blocks_line,
         remaining_line,
         (
             "Interpretation: taller remaining blocks mean weekly pace can increase; "
