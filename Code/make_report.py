@@ -559,6 +559,92 @@ def _split_pipe_values(val: Any) -> List[str]:
     return [p.strip() for p in parts if p and p.strip()]
 
 
+_URL_CANDIDATE_RE = re.compile(r"(?P<url>(?:https?://|www\.)[^\s<>\"']+)", re.IGNORECASE)
+
+
+def _trim_trailing_url_punctuation(url: str) -> Tuple[str, str]:
+    trimmed = url
+    trailing = ""
+    while trimmed and trimmed[-1] in ".,;:!?)]}":
+        trailing = trimmed[-1] + trailing
+        trimmed = trimmed[:-1]
+    return trimmed, trailing
+
+
+def _normalize_clickable_href(raw_url: str) -> Optional[str]:
+    txt = str(raw_url or "").strip()
+    if not txt:
+        return None
+    lower = txt.lower()
+    if lower.startswith("http://") or lower.startswith("https://") or lower.startswith("mailto:"):
+        return txt
+    if lower.startswith("www."):
+        return f"https://{txt}"
+    return None
+
+
+def _linkify_urls_in_text(value: Any, preserve_newlines: bool = True) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    text = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    if not text:
+        return ""
+
+    parts: List[str] = []
+    cursor = 0
+    for match in _URL_CANDIDATE_RE.finditer(text):
+        start, end = match.span()
+        if start > cursor:
+            parts.append(html.escape(text[cursor:start]))
+
+        raw_url = match.group("url")
+        core_url, trailing = _trim_trailing_url_punctuation(raw_url)
+        href = _normalize_clickable_href(core_url)
+        if href and core_url:
+            parts.append(
+                "<a href='"
+                + html.escape(href, quote=True)
+                + "' target='_blank' rel='noopener noreferrer'>"
+                + html.escape(core_url)
+                + "</a>"
+            )
+        else:
+            parts.append(html.escape(raw_url))
+            trailing = ""
+
+        if trailing:
+            parts.append(html.escape(trailing))
+        cursor = end
+
+    if cursor < len(text):
+        parts.append(html.escape(text[cursor:]))
+
+    rendered = "".join(parts)
+    if not preserve_newlines:
+        rendered = rendered.replace("\n", "<br/>")
+    return rendered
+
+
+def _render_pipe_links(value: Any) -> str:
+    items = _split_pipe_values(value)
+    if not items:
+        return ""
+    rendered: List[str] = []
+    for item in items:
+        href = _normalize_clickable_href(item)
+        if href:
+            rendered.append(
+                "<a href='"
+                + html.escape(href, quote=True)
+                + "' target='_blank' rel='noopener noreferrer'>"
+                + html.escape(item)
+                + "</a>"
+            )
+        else:
+            rendered.append(html.escape(item))
+    return " | ".join(rendered)
+
+
 # ----------------------------
 # Reading time_log.xlsx
 # ----------------------------
@@ -2134,8 +2220,13 @@ def build_project_info_tables_html(
             val = info.get(key)
             if val is None or (isinstance(val, float) and pd.isna(val)) or str(val).strip() == "":
                 continue
+            key_text = str(key).strip()
+            if key_text.casefold() == "key_links":
+                value_html = _render_pipe_links(val) or html.escape(str(val))
+            else:
+                value_html = html.escape(str(val))
             rows.append(
-                "<tr><td>" + html.escape(str(key)) + "</td><td>" + html.escape(str(val)) + "</td></tr>"
+                "<tr><td>" + html.escape(key_text) + "</td><td>" + value_html + "</td></tr>"
             )
 
         if not rows:
@@ -5301,8 +5392,13 @@ def build_projects_page_html(
             val = info.get(key)
             if val is None or (isinstance(val, float) and pd.isna(val)) or str(val).strip() == "":
                 continue
+            key_text = str(key).strip()
+            if key_text.casefold() == "key_links":
+                value_html = _render_pipe_links(val) or html.escape(str(val))
+            else:
+                value_html = html.escape(str(val))
             info_rows.append(
-                "<tr><td>" + html.escape(str(key)) + "</td><td>" + html.escape(str(val)) + "</td></tr>"
+                "<tr><td>" + html.escape(key_text) + "</td><td>" + value_html + "</td></tr>"
             )
         info_table = (
             "<table class='project-info-table'>"
@@ -5315,11 +5411,11 @@ def build_projects_page_html(
         txt_blocks: List[str] = []
         for t in dels.get("texts", []) or []:
             fn = html.escape(str(t.get("filename", "")))
-            content = html.escape(str(t.get("content", "") or ""))
+            content_html = _linkify_urls_in_text(t.get("content", ""), preserve_newlines=True)
             txt_blocks.append(
                 "<div class='deliverable-text'>"
                 f"<div class='deliverable-fn'>{fn}</div>"
-                f"<pre>{content}</pre>"
+                f"<pre>{content_html}</pre>"
                 "</div>"
             )
         img_blocks: List[str] = []
