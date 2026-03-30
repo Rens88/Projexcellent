@@ -2136,57 +2136,58 @@ def build_nn_metrics_html(nn_summary: Optional[Dict[str, Any]], note: Optional[s
 def build_nn_sideways_bar_title_html(nn_summary: Optional[Dict[str, Any]] = None) -> str:
     avg_weekly_reported_hours = _to_float((nn_summary or {}).get("avg_weekly_reported_hours"))
     avg_weekly_remaining_hours = _to_float((nn_summary or {}).get("avg_weekly_remaining_hours"))
-    remaining_weekly_vs_reported_pct = _to_float((nn_summary or {}).get("remaining_weekly_vs_reported_pct"))
     completed_weeks = int(_to_float((nn_summary or {}).get("completed_weeks")) or 0)
     remaining_weeks = int(_to_float((nn_summary or {}).get("remaining_weeks")) or 0)
 
+    def _format_hours(value: Optional[float]) -> str:
+        if value is None:
+            return "n/a"
+        rounded = round(float(value))
+        if abs(float(value) - rounded) < 0.05:
+            return str(int(rounded))
+        return f"{float(value):.1f}"
+
+    total_hours = _to_float((nn_summary or {}).get("nn_total_hours"))
+    if total_hours is None or total_hours <= 0:
+        total_hours = _to_float((nn_summary or {}).get("yearly_total_hours"))
+    if total_hours is None or total_hours <= 0:
+        segments = (nn_summary or {}).get("month_segments") or []
+        total_hours = sum(max(_to_float(segment.get("hours")) or 0.0, 0.0) for segment in segments) or None
+    if total_hours is None or total_hours <= 0:
+        total_hours = _to_float((nn_summary or {}).get("year_available_hours"))
+    total_hours_text = _format_hours(total_hours)
+
     if avg_weekly_reported_hours is not None and completed_weeks > 0:
-        up_to_now_line = (
-            f"100% height = average up-until-now pace: {avg_weekly_reported_hours:.1f} h/week "
-            f"across {completed_weeks} completed weeks."
+        baseline_line = (
+            f"100% height baseline: {avg_weekly_reported_hours:.1f} h/week "
+            f"over {completed_weeks} completed weeks."
         )
     else:
-        up_to_now_line = "100% height = average up-until-now pace over completed weeks."
-
-    completed_blocks_line = (
-        "Completed (blue) blocks are scaled per period: billed h/week for that block, "
-        "using weighted week-equivalents so partial weeks are proportional."
-    )
+        baseline_line = "100% height baseline: average up-until-now pace over completed weeks."
 
     if avg_weekly_remaining_hours is not None and remaining_weeks > 0:
-        if remaining_weekly_vs_reported_pct is not None:
-            remaining_line = (
-                f"Remaining blocks are scaled to {remaining_weekly_vs_reported_pct:.0f}% "
-                f"({avg_weekly_remaining_hours:.1f} h/week over {remaining_weeks} remaining weeks)."
-            )
-        else:
-            remaining_line = (
-                f"Remaining blocks are scaled from remaining_hours / remaining_weeks = "
-                f"{avg_weekly_remaining_hours:.1f} h/week over {remaining_weeks} weeks."
-            )
+        remaining_line = (
+            "Remaining blocks use the required future pace: "
+            f"{avg_weekly_remaining_hours:.1f} h/week over {remaining_weeks} remaining weeks."
+        )
     else:
-        remaining_line = "Remaining blocks are scaled from remaining_hours / remaining_weeks."
+        remaining_line = "Remaining blocks use the required future pace across remaining weeks."
 
     help_lines = [
-        f"Width shows monthly billed/expected {_company_label_short()} hours against yearly total (x-axis 0% to 100%).",
-        up_to_now_line,
-        completed_blocks_line,
+        "Visualization of billed and remaining hours.",
+        "Blue blocks show billed hours; orange blocks show remaining planned hours.",
+        f"X-axis: progress through the yearly total from 0% to 100% ({total_hours_text} h = 100%).",
+        "If the current month is in progress, it is split into billed-so-far and not-yet-billed.",
+        "Future block width follows hours available per month, so narrower blocks can reflect holidays, unavailability, or capacity used elsewhere.",
+        "Block height shows average hours per week.",
+        baseline_line,
+        "Completed blocks use the actual billed pace in that period.",
         remaining_line,
-        (
-            "Interpretation: taller remaining blocks mean weekly pace can increase; "
-            "smaller remaining blocks mean weekly pace should be throttled now."
-        ),
+        "Interpretation: lower future blocks mean a lower weekly pace is needed; higher future blocks mean the required pace must increase.",
     ]
     tooltip_html = "<br>".join(html.escape(line) for line in help_lines)
-    subtitle_text = _build_nn_sideways_bar_subtitle_text(nn_summary)
-    title_text = f"{_company_label_short()} Year Plan (Actual + Expected)"
-    subtitle_html = f" | {html.escape(subtitle_text)}" if subtitle_text else ""
     return (
         "<div class='nn-sideways-bar-title-row'>"
-        "<div class='nn-sideways-bar-title'>"
-        f"{html.escape(title_text)}"
-        f"<span class='nn-sideways-bar-subtitle'>{subtitle_html}</span>"
-        "</div>"
         f"<span class='nn-help-icon' tabindex='0' role='button' aria-label='{html.escape(_company_label_short())} year plan explanation'>?"
         f"<span class='nn-help-tooltip'>{tooltip_html}</span>"
         "</span>"
@@ -5602,8 +5603,8 @@ def write_tabbed_html(
     nn_sideways_bar_title_html = build_nn_sideways_bar_title_html(nn_summary)
     sideways_bar_chart_block_html = (
         "<div class='nn-sideways-bar-block'>"
+        f"<div class='nn-sideways-bar-chart-wrap'>{sideways_bar_chart_html}</div>"
         f"{nn_sideways_bar_title_html}"
-        f"{sideways_bar_chart_html}"
         "</div>"
         if sideways_bar_chart_html
         else ""
@@ -5755,29 +5756,27 @@ def write_tabbed_html(
     }}
     .nn-sideways-bar-block {{
       display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 2px;
+      flex-direction: row;
+      align-items: flex-start;
+      justify-content: center;
+      gap: 6px;
       min-width: 420px;
-      max-width: 540px;
-      width: min(540px, 52vw);
+      max-width: 560px;
+      width: min(560px, 54vw);
+    }}
+    .nn-sideways-bar-chart-wrap {{
+      flex: 1 1 auto;
+      min-width: 0;
+    }}
+    .nn-sideways-bar-chart-wrap .plotly-graph-div {{
+      width: 100% !important;
     }}
     .nn-sideways-bar-title-row {{
       display: flex;
       align-items: center;
-      justify-content: center;
-      gap: 4px;
-    }}
-    .nn-sideways-bar-title {{
-      writing-mode: horizontal-tb;
-      transform: none;
-      font-size: 11px;
-      color: #111;
-      line-height: 1.15;
-    }}
-    .nn-sideways-bar-subtitle {{
-      color: #444;
-      font-weight: 500;
+      justify-content: flex-start;
+      flex: 0 0 auto;
+      padding-top: 2px;
     }}
     .nn-help-icon {{
       position: relative;
@@ -5847,7 +5846,7 @@ def write_tabbed_html(
       }}
       .nn-sideways-bar-block {{
         min-width: 300px;
-        width: min(540px, 94vw);
+        width: min(560px, 94vw);
       }}
       .header-branding {{
         min-width: 220px;
@@ -6602,8 +6601,8 @@ def write_multi_period_tabbed_html(
                 (
                     f"<div class=\"nn-sideways-bar-block period-nn{' active' if is_default else ''}\" "
                     f"id=\"nn-sideways-bar-block-{period_id}\">"
+                    f"<div class=\"nn-sideways-bar-chart-wrap\">{sideways_bar_chart_html}</div>"
                     f"{nn_sideways_bar_title_html}"
-                    f"{sideways_bar_chart_html}"
                     "</div>"
                 )
             )
@@ -6743,29 +6742,27 @@ def write_multi_period_tabbed_html(
     .header-branding {{ display: flex; flex: 0 0 auto; min-width: 220px; justify-content: center; align-items: center; gap: 8px; flex-wrap: nowrap; }}
     .nn-sideways-bar-block {{
       display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 2px;
+      flex-direction: row;
+      align-items: flex-start;
+      justify-content: center;
+      gap: 6px;
       min-width: 420px;
-      max-width: 540px;
-      width: min(540px, 52vw);
+      max-width: 560px;
+      width: min(560px, 54vw);
+    }}
+    .nn-sideways-bar-chart-wrap {{
+      flex: 1 1 auto;
+      min-width: 0;
+    }}
+    .nn-sideways-bar-chart-wrap .plotly-graph-div {{
+      width: 100% !important;
     }}
     .nn-sideways-bar-title-row {{
       display: flex;
       align-items: center;
-      gap: 4px;
-      justify-content: center;
-    }}
-    .nn-sideways-bar-title {{
-      writing-mode: horizontal-tb;
-      transform: none;
-      font-size: 11px;
-      color: #111;
-      line-height: 1.15;
-    }}
-    .nn-sideways-bar-subtitle {{
-      color: #444;
-      font-weight: 500;
+      justify-content: flex-start;
+      flex: 0 0 auto;
+      padding-top: 2px;
     }}
     .nn-help-icon {{
       position: relative;
@@ -6818,7 +6815,7 @@ def write_multi_period_tabbed_html(
       .report-header {{ flex-wrap: wrap; gap: 12px; }}
       .header-left {{ flex: 1 1 100%; }}
       .header-nn {{ flex: 1 1 100%; min-width: 300px; }}
-      .nn-sideways-bar-block {{ min-width: 300px; width: min(540px, 94vw); }}
+      .nn-sideways-bar-block {{ min-width: 300px; width: min(560px, 94vw); }}
       .header-branding {{ min-width: 220px; justify-content: flex-start; }}
     }}
     .tabs {{ display: flex; gap: 8px; margin: 2px 0 8px; padding-bottom: 8px; flex-wrap: wrap; justify-content: center; align-items: center; }}
@@ -6844,7 +6841,7 @@ def write_multi_period_tabbed_html(
     .period-note.active {{ display: block; }}
     .period-note.active:empty {{ display: none; }}
     .period-nn {{ display: none; }}
-    .period-nn.active {{ display: block; }}
+    .period-nn.active {{ display: flex; }}
     .hours-metrics {{ margin: 6px 0 16px; }}
     .hours-metrics:empty {{ display: none; margin: 0; }}
     .nn-note {{ margin-top: 6px; font-size: 13px; color: #8A3B3B; }}

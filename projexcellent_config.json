@@ -1,29 +1,27 @@
 {
-  "report_title": "Project Portfolio Overview",
-  "person_name": "john doe",
+  "report_title": "NOC*NSF <> DSA",
+  "person_name": "Rens Meerhoff",
   "company": {
     "name": "NOC*NSF",
     "abbreviation": "NN"
   },
   "paths": {
-    "projects_dir": "Projecten",
+    "projects_dir": "C:\\Users\\rmeer\\OneDrive - NOCNSF\\Projexcellent\\Projecten",
     "dummy_projects_dir": "DummyProjecten",
-    "reports_dir": "Reports",
+    "reports_dir": "C:\\Users\\rmeer\\OneDrive - NOCNSF\\Projexcellent\\Reports",
     "templates_dir": "Templates",
     "assets_dir": "assets",
     "hours_remaining": {
       "excel_paths": [
-        "Data/hours_remaining.xlsx",
-        "Data/nn_maandelijks.xlsx",
-        "Data/NN_maandelijks.xlsx"
+      "C:\\Users\\rmeer\\Dropbox\\Public\\DataScienceAgency\\Admin\\Uren\\2026_DSA_invulsheet_uren_en_declaraties.xlsx"
       ],
       "sheet_name": "NN_maandelijks",
       "header_row": 2
     }
   },
   "branding": {
-    "profile_photo": "assets/profile_photo.jpg",
-    "logo": "assets/logo.png"
+    "profile_photo": "assets\\profielfotos_nocnsf_square.jpg",
+    "logo": "assets\\teamnl_sport_science_centre_LOGO.png"
   },
   "hours": {
     "workable_hours_per_year": null,
