@@ -1,3 +1,20 @@
+1.1 - I want to better visualize how many hours are left in the year. It should show the necessity to throttle hours "now". I want to use the height of the horizontally stacked bar to visaulize this.
+1.1.1 - compute the average weekly hours up until now (including completed weeks only)
+1.1.2 - scale all blocks representing up until now to 100%, where 100% is the average weekly hours as reported in 1.1.1.
+1.1.3 - compute how many hours on average per week can be spent in the remaining weeks, by dividing the remaining hours by the number of weeks
+1.1.4 - scale the remaining blocks based on the computed average weekly hours from 1.1.3 (where 1.1.1 equals 100%). This should either show taller blocks indicating the weekly hours can increase with respect to the averate up until now, or smaller blocks indicating the weekly hours should be limited.
+1.1.5 - update the explanatory text under the hover question mark so it explains this feature
+Make horizontal stacked bar scale in height to average weekly hours, where period up until now is 100%.
+1.2 - The hover is now not visible at all. Probably because it contains too much information. Reduce it to: 
+ 1.2.1 - how many hours were billed in a month or how many hours are epxected to be billed in a month (which is now represented by the width of each block)
+ 1.2.2 - how many hours are remaining given 1.2.1
+ 1.2.3 - how many hours per week were reported(1.1.1) or are available (1.1.3).
+
+2.1 - Timeline second plot (Estimated maginutde) per week should get some explanation too: For each project, the weekly hours are estimated by spreading the hours cap over the number of weeks between start- and end of project. 100% equals XXX just like the timeseries plot with the reported weekly hours.
+
+3.1 - deep-dive xticklabels of hours per theme overlap with title of next plot (hours per requester). Create more space and/or put xtick labels on angle.
+
+***
 - Nieuwe rapportage methode: WAAROM?
 -> Overzicht uren aan wie/wat besteed
 -> Overzicht lopende projecten (dwingt tot formuleren van "project")

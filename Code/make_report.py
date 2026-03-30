@@ -1366,6 +1366,66 @@ def compute_nn_summary(
     remaining = _to_float(asof_row.get(remaining_col)) if remaining_col else None
     billed_cumulative_at_asof = _to_float(asof_row.get(billed_year_col)) if billed_year_col else None
 
+    # Weekly-pace context for year-plan bar-height scaling:
+    # - up-until-now uses completed weeks only
+    # - remaining pace spreads remaining hours over remaining weeks in the year
+    year_start = date(target_year, 1, 1)
+    year_end = date(target_year, 12, 31)
+    year_start_week = year_start - timedelta(days=year_start.weekday())
+    year_end_week_start = year_end - timedelta(days=year_end.weekday())
+    total_weeks_in_year = max(((year_end_week_start - year_start_week).days // 7) + 1, 1)
+
+    current_week_start = reference_date - timedelta(days=reference_date.weekday())
+    last_completed_week_end = current_week_start - timedelta(days=1)
+    completed_weeks = 0
+    if last_completed_week_end >= year_start:
+        last_completed_week_start = last_completed_week_end - timedelta(days=last_completed_week_end.weekday())
+        completed_weeks = max(((last_completed_week_start - year_start_week).days // 7) + 1, 0)
+    completed_weeks = min(completed_weeks, total_weeks_in_year)
+    remaining_weeks = max(total_weeks_in_year - completed_weeks, 0)
+
+    reported_hours_completed_weeks = 0.0
+    if (
+        all_time_entries_df is not None
+        and not all_time_entries_df.empty
+        and "date" in all_time_entries_df.columns
+        and "duration_hours" in all_time_entries_df.columns
+        and completed_weeks > 0
+        and last_completed_week_end >= year_start
+    ):
+        entries = all_time_entries_df.copy()
+        entries["date"] = pd.to_datetime(entries["date"], errors="coerce")
+        entries["duration_hours"] = pd.to_numeric(entries["duration_hours"], errors="coerce").fillna(0.0)
+        entries = entries.dropna(subset=["date"])
+        if not entries.empty:
+            entries = entries.loc[
+                (entries["date"] >= pd.Timestamp(year_start))
+                & (entries["date"] <= pd.Timestamp(last_completed_week_end))
+            ]
+            if not entries.empty:
+                reported_hours_completed_weeks = float(entries["duration_hours"].sum())
+
+    avg_weekly_reported_hours = (
+        (reported_hours_completed_weeks / float(completed_weeks))
+        if completed_weeks > 0
+        else None
+    )
+    remaining_hours_for_weekly_pacing = max(float(remaining), 0.0) if remaining is not None else None
+    avg_weekly_remaining_hours = (
+        (remaining_hours_for_weekly_pacing / float(remaining_weeks))
+        if remaining_hours_for_weekly_pacing is not None and remaining_weeks > 0
+        else None
+    )
+    remaining_weekly_vs_reported_pct = (
+        (avg_weekly_remaining_hours / avg_weekly_reported_hours * 100.0)
+        if (
+            avg_weekly_remaining_hours is not None
+            and avg_weekly_reported_hours is not None
+            and avg_weekly_reported_hours > 0
+        )
+        else None
+    )
+
     project_logged_hours = (
         float(pd.to_numeric(time_entries_df_filtered["duration_hours"], errors="coerce").fillna(0.0).sum())
         if not time_entries_df_filtered.empty and "duration_hours" in time_entries_df_filtered.columns
@@ -1615,6 +1675,7 @@ def compute_nn_summary(
     summary = dict(
         period_type=period_type,
         period_month=asof_month,
+        reference_date=reference_date,
         billed=billed,
         remaining=remaining,
         project_logged_hours=project_logged_hours,
@@ -1629,6 +1690,14 @@ def compute_nn_summary(
             if (billed_cumulative_at_asof is not None and remaining is not None)
             else ((billed + remaining) if (billed is not None and remaining is not None) else None)
         ),
+        total_weeks_in_year=total_weeks_in_year,
+        completed_weeks=completed_weeks,
+        remaining_weeks=remaining_weeks,
+        last_completed_week_end=last_completed_week_end if completed_weeks > 0 else None,
+        reported_hours_completed_weeks=reported_hours_completed_weeks,
+        avg_weekly_reported_hours=avg_weekly_reported_hours,
+        avg_weekly_remaining_hours=avg_weekly_remaining_hours,
+        remaining_weekly_vs_reported_pct=remaining_weekly_vs_reported_pct,
         month_segments=month_segments,
     )
     return summary, None
@@ -1668,6 +1737,10 @@ def build_nn_sideways_bar_chart_html(nn_summary: Optional[Dict[str, Any]], div_i
     total_workable_days_raw = nn_summary.get("year_available_workdays")
     total_workable_days = _to_float(total_workable_days_raw)
     holidays_excluded = bool(nn_summary.get("holidays_excluded"))
+    avg_weekly_reported_hours = _to_float(nn_summary.get("avg_weekly_reported_hours"))
+    avg_weekly_remaining_hours = _to_float(nn_summary.get("avg_weekly_remaining_hours"))
+    completed_weeks = int(_to_float(nn_summary.get("completed_weeks")) or 0)
+    remaining_weeks = int(_to_float(nn_summary.get("remaining_weeks")) or 0)
     if total_calendar_workdays is None or total_calendar_workdays <= 0:
         total_calendar_workdays = total_workable_days
     if total_workable_days is None or total_workable_days <= 0:
@@ -1675,29 +1748,30 @@ def build_nn_sideways_bar_chart_html(nn_summary: Optional[Dict[str, Any]], div_i
     if total_calendar_workdays is None or total_calendar_workdays <= 0:
         total_calendar_workdays = total_workable_days
 
+    base_block_height = 0.62
+    remaining_height_scale = 1.0
+    if (
+        avg_weekly_reported_hours is not None
+        and avg_weekly_reported_hours > 0
+        and avg_weekly_remaining_hours is not None
+        and avg_weekly_remaining_hours >= 0
+    ):
+        remaining_height_scale = avg_weekly_remaining_hours / avg_weekly_reported_hours
+    # Keep bars readable while preserving directional signal (throttle vs increase).
+    remaining_height_scale = max(0.40, min(remaining_height_scale, 1.8))
+
     total_segment_hours = 0.0
     cumulative_hours = 0.0
     cumulative_workdays = 0.0
     fig = go.Figure()
 
-    hover_rows = [
-        ("Block", "%{customdata[5]}"),
-        ("Billed so far (current month)", "%{customdata[1]:.0f} h"),
-        (f"Expected remaining for {_company_label_short()}", "%{customdata[3]:.0f} h"),
-        ("Remaining workable hours", "%{customdata[2]:.0f} h"),
-        (f"Expected {_company_label_short()} share this month", "%{customdata[4]:.0f}%"),
-        ("Block hours", "%{customdata[6]:.0f} h"),
-        ("Cumsum hours (year)", "%{customdata[7]:.0f} h"),
-        (f"Block pct of {_company_label_long()} total", "%{customdata[9]:.0f}% (base %{customdata[8]:.0f} h)"),
-        (f"Cumsum pct of {_company_label_long()} total", "%{customdata[10]:.0f}% (base %{customdata[8]:.0f} h)"),
-        ("Cumsum working days (Mon-Fri)", "%{customdata[11]:.0f}% (%{customdata[12]:.0f}/%{customdata[13]:.0f} d)"),
-    ]
-    hover_label_width = max(len(label) for label, _ in hover_rows)
-    hover_lines = ["<b>%{customdata[0]}</b>"]
-    for label, value_expr in hover_rows:
-        pad = "&nbsp;" * (hover_label_width - len(label) + 1)
-        hover_lines.append(f"{label}:{pad}{value_expr}")
-    hovertemplate = "<br>".join(hover_lines) + "<extra></extra>"
+    hovertemplate = (
+        "<b>%{customdata[0]}</b><br>"
+        "%{customdata[1]}<br>"
+        "%{customdata[2]}<br>"
+        "%{customdata[3]}"
+        "<extra></extra>"
+    )
 
     valid_segments: List[Dict[str, Any]] = []
     month_total_hours: Dict[str, float] = {}
@@ -1755,13 +1829,8 @@ def build_nn_sideways_bar_chart_html(nn_summary: Optional[Dict[str, Any]], div_i
                 )
         segment_calendar_workdays = max(float(segment_calendar_workdays), 0.0)
         cumulative_workdays += segment_calendar_workdays
-        block_pct_of_nn_total = (seg_hours / nn_total_hours * 100.0) if nn_total_hours > 0 else 0.0
-        cumsum_pct_of_nn_total = (cumulative_hours / nn_total_hours * 100.0) if nn_total_hours > 0 else 0.0
-        cumsum_workdays_pct = (
-            (cumulative_workdays / total_calendar_workdays * 100.0) if total_calendar_workdays > 0 else 0.0
-        )
-
         phase = str(segment.get("phase", "")).strip().lower()
+        is_remaining_phase = phase in ("current_expected", "future_expected")
         if phase == "completed":
             color = YEAR_PLAN_COMPLETED_COLOR
         elif phase == "current_billed":
@@ -1773,13 +1842,40 @@ def build_nn_sideways_bar_chart_html(nn_summary: Optional[Dict[str, Any]], div_i
         else:
             color = YEAR_PLAN_EXPECTED_COLOR
 
+        if phase in ("current_expected", "future_expected"):
+            month_hours_label = "Expected in month"
+        elif phase == "current_combined":
+            month_hours_label = "Billed + expected in month"
+        else:
+            month_hours_label = "Billed in month"
+
+        remaining_after_block = max(nn_total_hours - cumulative_hours, 0.0)
+        if is_remaining_phase:
+            if avg_weekly_remaining_hours is not None and remaining_weeks > 0:
+                weekly_line = (
+                    f"Available (remaining {remaining_weeks} weeks): "
+                    f"{avg_weekly_remaining_hours:.1f} h/week"
+                )
+            else:
+                weekly_line = "Available (remaining weeks): n/a"
+        else:
+            if avg_weekly_reported_hours is not None and completed_weeks > 0:
+                weekly_line = (
+                    f"Reported (completed {completed_weeks} weeks): "
+                    f"{avg_weekly_reported_hours:.1f} h/week"
+                )
+            else:
+                weekly_line = "Reported (completed weeks): n/a"
+
+        block_height = base_block_height * (remaining_height_scale if is_remaining_phase else 1.0)
+
         fig.add_trace(
             go.Bar(
                 x=[seg_hours],
                 y=[_company_label_short()],
                 orientation="h",
                 marker=dict(color=color, line=dict(color="#FFFFFF", width=1)),
-                width=[0.62],
+                width=[block_height],
                 text=[str(segment.get("month_abbr", ""))],
                 textposition="inside",
                 insidetextanchor="middle",
@@ -1787,19 +1883,9 @@ def build_nn_sideways_bar_chart_html(nn_summary: Optional[Dict[str, Any]], div_i
                 customdata=[
                     [
                         str(segment.get("month_name", "")),
-                        float(_to_float(segment.get("billed_so_far")) or 0.0),
-                        float(_to_float(segment.get("workable_hours")) or 0.0),
-                        float(_to_float(segment.get("expected_remaining_hours")) or 0.0),
-                        float(_to_float(segment.get("expected_pct")) or 0.0),
-                        str(segment.get("segment_label", "")),
-                        seg_hours,
-                        cumulative_hours,
-                        nn_total_hours,
-                        block_pct_of_nn_total,
-                        cumsum_pct_of_nn_total,
-                        cumsum_workdays_pct,
-                        cumulative_workdays,
-                        total_calendar_workdays,
+                        f"{month_hours_label}: {seg_hours:.0f} h",
+                        f"Remaining after this block: {remaining_after_block:.0f} h",
+                        weekly_line,
                     ]
                 ],
                 hovertemplate=hovertemplate,
@@ -1876,22 +1962,42 @@ def build_nn_metrics_html(nn_summary: Optional[Dict[str, Any]], note: Optional[s
 
 
 def build_nn_sideways_bar_title_html(nn_summary: Optional[Dict[str, Any]] = None) -> str:
+    avg_weekly_reported_hours = _to_float((nn_summary or {}).get("avg_weekly_reported_hours"))
+    avg_weekly_remaining_hours = _to_float((nn_summary or {}).get("avg_weekly_remaining_hours"))
+    remaining_weekly_vs_reported_pct = _to_float((nn_summary or {}).get("remaining_weekly_vs_reported_pct"))
+    completed_weeks = int(_to_float((nn_summary or {}).get("completed_weeks")) or 0)
+    remaining_weeks = int(_to_float((nn_summary or {}).get("remaining_weeks")) or 0)
+
+    if avg_weekly_reported_hours is not None and completed_weeks > 0:
+        up_to_now_line = (
+            f"Height up to now = 100%, based on {avg_weekly_reported_hours:.1f} h/week "
+            f"reported across {completed_weeks} completed weeks."
+        )
+    else:
+        up_to_now_line = "Height up to now = 100%, based on average reported hours over completed weeks."
+
+    if avg_weekly_remaining_hours is not None and remaining_weeks > 0:
+        if remaining_weekly_vs_reported_pct is not None:
+            remaining_line = (
+                f"Remaining blocks are scaled to {remaining_weekly_vs_reported_pct:.0f}% "
+                f"({avg_weekly_remaining_hours:.1f} h/week over {remaining_weeks} remaining weeks)."
+            )
+        else:
+            remaining_line = (
+                f"Remaining blocks are scaled from remaining_hours / remaining_weeks = "
+                f"{avg_weekly_remaining_hours:.1f} h/week over {remaining_weeks} weeks."
+            )
+    else:
+        remaining_line = "Remaining blocks are scaled from remaining_hours / remaining_weeks."
+
     help_lines = [
-        f"100% reflects the total {_company_label_long()} hours planned for the selected year.",
+        f"Width shows monthly billed/expected {_company_label_short()} hours against yearly total (x-axis 0% to 100%).",
+        up_to_now_line,
+        remaining_line,
         (
-            "Workable hours or capacity can change over time and includes all planned holidays "
-            "plus all planned other projects."
+            "Interpretation: taller remaining blocks mean weekly pace can increase; "
+            "smaller remaining blocks mean weekly pace should be throttled now."
         ),
-        (
-            "It does not yet include illness, other unplanned absence, or any new projects that "
-            "are not known yet."
-        ),
-        (
-            f"How to read: if expected {_company_label_short()} share this month or expected remaining {_company_label_short()} hours drops "
-            f"below your threshold, it can be a signal to reduce {_company_label_short()} hours short term so enough "
-            "hours remain for later in the year."
-        ),
-        "Past months always show actual billed hours.",
     ]
     tooltip_html = "<br>".join(html.escape(line) for line in help_lines)
     subtitle_text = _build_nn_sideways_bar_subtitle_text(nn_summary)
@@ -2484,6 +2590,8 @@ def add_stacked_hours_bars(
     title: str,
     project_color_map: Dict[str, str],
     section_title: Optional[str] = None,
+    x_tickangle: Optional[float] = None,
+    x_tickfont_size: Optional[int] = None,
 ) -> None:
     def _add_section_title() -> None:
         if not section_title:
@@ -2550,6 +2658,13 @@ def add_stacked_hours_bars(
 
     groups = sorted(all_groups, key=lambda g: (-group_hours.get(g, 0.0), str(g)))
     fig.update_xaxes(categoryorder="array", categoryarray=groups, row=subplot_row, col=1)
+    xaxis_overrides: Dict[str, Any] = {}
+    if x_tickangle is not None:
+        xaxis_overrides["tickangle"] = x_tickangle
+    if x_tickfont_size is not None:
+        xaxis_overrides["tickfont"] = dict(size=x_tickfont_size)
+    if xaxis_overrides:
+        fig.update_xaxes(row=subplot_row, col=1, **xaxis_overrides)
 
     # Stacking order: first traces are at the bottom; ensure closed projects sit below active ones.
     project_groups.sort(key=lambda item: 1 if is_active_status(item[0].get("status")) else 0)
@@ -3430,6 +3545,8 @@ def build_hours_figure(
             4,
             "Hours per theme (stacked: each project contributes its hours)",
             project_color_map,
+            x_tickangle=-45,
+            x_tickfont_size=10,
         )
         add_stacked_hours_bars(
             fig,
@@ -3439,6 +3556,8 @@ def build_hours_figure(
             5,
             "Hours per requester (stacked: each project contributes its hours)",
             project_color_map,
+            x_tickangle=-45,
+            x_tickfont_size=10,
         )
         add_activitytype_weighted_pie(
             fig,
@@ -3494,6 +3613,8 @@ def build_hours_figure(
             6,
             "Hours per theme (stacked: each project contributes its hours)",
             project_color_map,
+            x_tickangle=-45,
+            x_tickfont_size=10,
         )
         add_stacked_hours_bars(
             fig,
@@ -3503,6 +3624,8 @@ def build_hours_figure(
             7,
             "Hours per requester (stacked: each project contributes its hours)",
             project_color_map,
+            x_tickangle=-45,
+            x_tickfont_size=10,
         )
         add_activitytype_weighted_pie(
             fig,
@@ -3617,7 +3740,7 @@ def build_hours_section_figures(
         rows=4,
         cols=1,
         shared_xaxes=False,
-        vertical_spacing=0.10,
+        vertical_spacing=0.12,
         row_heights=[0.26, 0.26, 0.26, 0.22],
         specs=[[{"type": "xy"}], [{"type": "xy"}], [{"type": "xy"}], [{"type": "domain"}]],
     )
@@ -3639,6 +3762,8 @@ def build_hours_section_figures(
         2,
         "Hours per theme (stacked: each project contributes its hours)",
         project_color_map,
+        x_tickangle=-45,
+        x_tickfont_size=10,
     )
     add_stacked_hours_bars(
         deep_dive_fig,
@@ -3648,6 +3773,8 @@ def build_hours_section_figures(
         3,
         "Hours per requester (stacked: each project contributes its hours)",
         project_color_map,
+        x_tickangle=-45,
+        x_tickfont_size=10,
     )
     add_activitytype_weighted_pie(
         deep_dive_fig,
@@ -3656,7 +3783,7 @@ def build_hours_section_figures(
         "ActivityType* share (weighted by hours)",
     )
     apply_axis_style(deep_dive_fig, 4)
-    _apply_standard_hours_layout(deep_dive_fig, height=1720)
+    _apply_standard_hours_layout(deep_dive_fig, height=1860)
     section_figs["deep_dive"] = deep_dive_fig
 
     return section_figs
@@ -3841,14 +3968,26 @@ def compute_weekly_reference_hours(
         return None, "none", None
 
     year_start = date(period_end.year, 1, 1)
-    entries = entries.loc[(entries["date"] >= pd.Timestamp(year_start)) & (entries["date"] <= pd.Timestamp(period_end))]
+    year_start_week = year_start - timedelta(days=year_start.weekday())
+    current_week_start = period_end - timedelta(days=period_end.weekday())
+    last_completed_week_end = current_week_start - timedelta(days=1)
+    if last_completed_week_end < year_start:
+        return None, "none", None
+
+    entries = entries.loc[
+        (entries["date"] >= pd.Timestamp(year_start))
+        & (entries["date"] <= pd.Timestamp(last_completed_week_end))
+    ]
     if entries.empty:
         return None, "none", None
 
+    last_completed_week_start = last_completed_week_end - timedelta(days=last_completed_week_end.weekday())
+    elapsed_weeks = max(((last_completed_week_start - year_start_week).days // 7) + 1, 0)
+    if elapsed_weeks <= 0:
+        return None, "none", None
+
     total_hours = float(entries["duration_hours"].sum())
-    elapsed_days = max((period_end - year_start).days + 1, 1)
-    elapsed_weeks = max(elapsed_days / 7.0, 1.0)
-    ref = total_hours / elapsed_weeks
+    ref = total_hours / float(elapsed_weeks)
     if ref <= 0:
         return None, "none", None
     return ref, "avg_reported_so_far", None
@@ -3862,8 +4001,8 @@ def compute_weekly_progress_guidance(
 ) -> Optional[Dict[str, Any]]:
     """
     Guidance lines for "Reported time per week" percentage chart:
-      - Avg percent worked so far (from year start through current week)
-      - Avg percent needed for remaining year (from next week through year end)
+      - Avg percent worked so far (from year start through completed weeks only)
+      - Avg percent needed for remaining year (from current week through year end)
     """
     ref = _to_float(weekly_reference_hours)
     if ref is None or ref <= 0:
@@ -3881,16 +4020,37 @@ def compute_weekly_progress_guidance(
     year_end = date(period_end.year, 12, 31)
     year_start_week = year_start - timedelta(days=year_start.weekday())
     current_week_start = period_end - timedelta(days=period_end.weekday())
-    current_week_end = min(current_week_start + timedelta(days=6), year_end)
-    next_week_start = current_week_start + timedelta(days=7)
     year_end_week_start = year_end - timedelta(days=year_end.weekday())
 
-    reported_so_far = 0.0
+    completed_weeks = int(_to_float(summary.get("completed_weeks")) or 0)
+    remaining_weeks = int(_to_float(summary.get("remaining_weeks")) or 0)
+    last_completed_week_end: Optional[date] = None
+    last_completed_week_end_raw = summary.get("last_completed_week_end")
+    if last_completed_week_end_raw is not None:
+        try:
+            last_completed_week_end = pd.Timestamp(last_completed_week_end_raw).date()
+        except Exception:
+            last_completed_week_end = None
+    if last_completed_week_end is None:
+        inferred_last_completed = current_week_start - timedelta(days=1)
+        if inferred_last_completed >= year_start:
+            last_completed_week_end = inferred_last_completed
+    if completed_weeks <= 0 and last_completed_week_end is not None and last_completed_week_end >= year_start:
+        last_completed_week_start = last_completed_week_end - timedelta(days=last_completed_week_end.weekday())
+        completed_weeks = max(((last_completed_week_start - year_start_week).days // 7) + 1, 0)
+    completed_weeks = max(completed_weeks, 0)
+
+    reported_so_far = _to_float(summary.get("reported_hours_completed_weeks")) or 0.0
+    avg_so_far_hours = _to_float(summary.get("avg_weekly_reported_hours"))
+
     if (
         all_time_entries_df is not None
         and not all_time_entries_df.empty
         and "date" in all_time_entries_df.columns
         and "duration_hours" in all_time_entries_df.columns
+        and last_completed_week_end is not None
+        and completed_weeks > 0
+        and (reported_so_far <= 0 or avg_so_far_hours is None)
     ):
         entries = all_time_entries_df.copy()
         entries["date"] = pd.to_datetime(entries["date"], errors="coerce")
@@ -3899,13 +4059,19 @@ def compute_weekly_progress_guidance(
         if not entries.empty:
             entries = entries.loc[
                 (entries["date"] >= pd.Timestamp(year_start))
-                & (entries["date"] <= pd.Timestamp(period_end))
+                & (entries["date"] <= pd.Timestamp(last_completed_week_end))
             ]
-            reported_so_far = float(entries["duration_hours"].sum())
+            if not entries.empty:
+                reported_so_far = float(entries["duration_hours"].sum())
+
+    if avg_so_far_hours is None and completed_weeks > 0:
+        avg_so_far_hours = reported_so_far / float(completed_weeks)
 
     billed_so_far: Optional[float] = None
     if remaining_from_summary is not None:
-        billed_so_far = max(float(yearly_total) - float(remaining_from_summary), 0.0)
+        # Use completed-weeks pace source for the "up until now" line so it aligns
+        # with the year-plan bar logic (completed weeks only).
+        billed_so_far = reported_so_far
 
     tracked_source = "reported"
     tracked_so_far = reported_so_far
@@ -3913,23 +4079,24 @@ def compute_weekly_progress_guidance(
         tracked_source = "billed"
         tracked_so_far = billed_so_far
 
-    elapsed_weeks = max(((current_week_start - year_start_week).days // 7) + 1, 1)
-    avg_so_far_hours = tracked_so_far / float(elapsed_weeks)
-    worked_pct = avg_so_far_hours * 100.0 / ref
+    worked_pct: Optional[float] = None
+    if completed_weeks > 0 and avg_so_far_hours is not None:
+        worked_pct = avg_so_far_hours * 100.0 / ref
 
     remaining_hours = (
         max(float(remaining_from_summary), 0.0)
         if remaining_from_summary is not None
         else max(float(yearly_total) - tracked_so_far, 0.0)
     )
-    weeks_remaining = 0
+    weeks_remaining = max(remaining_weeks, 0)
+    if weeks_remaining <= 0 and current_week_start <= year_end_week_start:
+        weeks_remaining = ((year_end_week_start - current_week_start).days // 7) + 1
+
     remaining_pct: Optional[float] = None
     avg_remaining_hours: Optional[float] = None
-    if next_week_start <= year_end_week_start:
-        weeks_remaining = ((year_end_week_start - next_week_start).days // 7) + 1
-        if weeks_remaining > 0:
-            avg_remaining_hours = remaining_hours / float(weeks_remaining)
-            remaining_pct = avg_remaining_hours * 100.0 / ref
+    if weeks_remaining > 0:
+        avg_remaining_hours = remaining_hours / float(weeks_remaining)
+        remaining_pct = avg_remaining_hours * 100.0 / ref
 
     return {
         "reference_hours_per_week": ref,
@@ -3939,17 +4106,18 @@ def compute_weekly_progress_guidance(
         "billed_hours_so_far": billed_so_far,
         "tracked_source": tracked_source,
         "tracked_hours_so_far": tracked_so_far,
-        "elapsed_weeks": elapsed_weeks,
+        "elapsed_weeks": completed_weeks,
         "worked_pct": worked_pct,
-        "worked_x0": year_start_week,
-        "worked_x1": current_week_end,
+        "worked_x0": year_start_week if completed_weeks > 0 else None,
+        "worked_x1": last_completed_week_end if completed_weeks > 0 else None,
         "worked_hours_per_week": avg_so_far_hours,
         "remaining_hours": remaining_hours,
         "weeks_remaining": weeks_remaining,
         "remaining_pct": remaining_pct,
-        "remaining_x0": next_week_start if weeks_remaining > 0 else None,
-        "remaining_x1": year_end,
+        "remaining_x0": current_week_start if weeks_remaining > 0 else None,
+        "remaining_x1": year_end if weeks_remaining > 0 else None,
         "remaining_hours_per_week": avg_remaining_hours,
+        "show_worked_line": completed_weeks > 0,
     }
 
 
@@ -4036,6 +4204,76 @@ def build_monthly_average_explanation_html(
     return "<div class='weekly-guidance'><div>" + html.escape(summary_sentence) + "</div></div>"
 
 
+def _build_weekly_reference_basis_formula(
+    ref: float,
+    weekly_reference_source: str,
+    weekly_progress_guidance: Optional[Dict[str, Any]] = None,
+) -> str:
+    guidance = weekly_progress_guidance or {}
+    yearly_total = _to_float(guidance.get("yearly_total_hours"))
+    yearly_available = _to_float(guidance.get("yearly_available_hours"))
+    reported_so_far = _to_float(guidance.get("reported_hours_so_far"))
+    elapsed_weeks = int(guidance.get("elapsed_weeks") or 0)
+
+    if weekly_reference_source == "config_week_reference":
+        return (
+            f"100% = config.hours.workable_hours_per_week_reference_value = {ref:.1f} h/week."
+        )
+    if weekly_reference_source == "year_total_div_46":
+        if yearly_total is not None and yearly_total > 0:
+            return f"100% = yearly total hours / 46 = {yearly_total:.0f}/46 = {ref:.1f} h/week."
+        return f"100% = yearly total hours / 46 = {ref:.1f} h/week."
+    if weekly_reference_source == "year_capacity_div_46":
+        if yearly_available is not None and yearly_available > 0:
+            return (
+                "100% = yearly available hours / 46 = "
+                f"{yearly_available:.0f}/46 = {ref:.1f} h/week (fallback)."
+            )
+        return f"100% = yearly available hours / 46 = {ref:.1f} h/week (fallback)."
+    if reported_so_far is not None and elapsed_weeks > 0:
+        return (
+            f"100% = average reported hours so far = "
+            f"{reported_so_far:.1f}/{elapsed_weeks} = {ref:.1f} h/week."
+        )
+    return f"100% = average reported hours so far = {ref:.1f} h/week."
+
+
+def build_estimated_magnitude_explanation_html(
+    weekly_reference_hours: Optional[float],
+    weekly_reference_source: str,
+    weekly_progress_guidance: Optional[Dict[str, Any]] = None,
+) -> str:
+    ref = _to_float(weekly_reference_hours)
+    if ref is None or ref <= 0:
+        return ""
+
+    basis_formula = _build_weekly_reference_basis_formula(
+        float(ref),
+        weekly_reference_source,
+        weekly_progress_guidance,
+    )
+    estimate_formula = (
+        "Per project, the weekly estimate is calculated by spreading the hours cap over the active project weeks: "
+        "project_weekly_estimate = hours_cap / number_of_weeks_between_project_start_and_end."
+    )
+    fallback_note = (
+        "If hours cap is missing, estimated-magnitude weight is used as fallback in the same weekly spread."
+    )
+    pct_line = (
+        f"The percentage conversion uses the same base as the reported-hours timeline: 100% = {ref:.1f} h/week."
+    )
+
+    return (
+        "<div class='weekly-guidance'>"
+        "<div><b>Estimated magnitude per week (second timeline plot)</b></div>"
+        f"<div class='weekly-guidance-formula'>{html.escape(estimate_formula)}</div>"
+        f"<div>{html.escape(fallback_note)}</div>"
+        f"<div>{html.escape(pct_line)}</div>"
+        f"<div class='weekly-guidance-formula'>{html.escape(basis_formula)}</div>"
+        "</div>"
+    )
+
+
 def build_weekly_progress_explanation_html(
     weekly_progress_guidance: Optional[Dict[str, Any]],
     weekly_reference_source: str,
@@ -4047,46 +4285,40 @@ def build_weekly_progress_explanation_html(
     if ref is None or ref <= 0:
         return ""
 
-    yearly_total = _to_float(weekly_progress_guidance.get("yearly_total_hours")) or 0.0
-    yearly_available = _to_float(weekly_progress_guidance.get("yearly_available_hours")) or 0.0
     reported_so_far = _to_float(weekly_progress_guidance.get("reported_hours_so_far")) or 0.0
     tracked_so_far = _to_float(weekly_progress_guidance.get("tracked_hours_so_far")) or reported_so_far
     tracked_source = str(weekly_progress_guidance.get("tracked_source", "reported")).strip().lower()
     elapsed_weeks = int(weekly_progress_guidance.get("elapsed_weeks") or 0)
-    worked_hpw = _to_float(weekly_progress_guidance.get("worked_hours_per_week")) or 0.0
-    worked_pct = _to_float(weekly_progress_guidance.get("worked_pct")) or 0.0
+    worked_hpw = _to_float(weekly_progress_guidance.get("worked_hours_per_week"))
+    worked_pct = _to_float(weekly_progress_guidance.get("worked_pct"))
     remaining_hours = _to_float(weekly_progress_guidance.get("remaining_hours")) or 0.0
     weeks_remaining = int(weekly_progress_guidance.get("weeks_remaining") or 0)
     remaining_hpw = _to_float(weekly_progress_guidance.get("remaining_hours_per_week"))
     remaining_pct = _to_float(weekly_progress_guidance.get("remaining_pct"))
 
-    if weekly_reference_source == "config_week_reference":
-        basis_formula = (
-            f"100% = config.hours.workable_hours_per_week_reference_value = {ref:.1f} h/week."
-        )
-    elif weekly_reference_source == "year_total_div_46":
-        basis_formula = (
-            f"100% = yearly total hours / 46 = {yearly_total:.0f}/46 = {ref:.1f} h/week."
-        )
-    elif weekly_reference_source == "year_capacity_div_46":
-        basis_formula = (
-            f"100% = yearly available hours / 46 = {yearly_available:.0f}/46 = {ref:.1f} h/week (fallback)."
-        )
-    else:
-        elapsed_for_formula = max(elapsed_weeks, 1)
-        basis_formula = (
-            f"100% = average reported hours so far = {reported_so_far:.1f}/{elapsed_for_formula} = {ref:.1f} h/week."
-        )
+    basis_formula = _build_weekly_reference_basis_formula(
+        float(ref),
+        weekly_reference_source,
+        weekly_progress_guidance,
+    )
 
-    if tracked_source == "billed":
-        progress_sentence = (
-            f"Up until today, {tracked_so_far:.1f} hours have been billed in {elapsed_weeks} weeks, "
-            f"averaging {worked_hpw:.1f} h/week ({worked_pct:.1f}%) [horizontal dotted line]."
-        )
+    if elapsed_weeks > 0 and worked_hpw is not None and worked_pct is not None:
+        if tracked_source == "billed":
+            progress_sentence = (
+                f"Up until now (completed weeks only), {tracked_so_far:.1f} hours have been billed in "
+                f"{elapsed_weeks} completed weeks, averaging {worked_hpw:.1f} h/week ({worked_pct:.1f}%) "
+                "[horizontal dotted line]."
+            )
+        else:
+            progress_sentence = (
+                f"Up until now (completed weeks only), {tracked_so_far:.1f} hours have been reported in "
+                f"{elapsed_weeks} completed weeks, averaging {worked_hpw:.1f} h/week ({worked_pct:.1f}%) "
+                "[horizontal dotted line]."
+            )
     else:
         progress_sentence = (
-            f"Up until today, {tracked_so_far:.1f} hours have been reported in {elapsed_weeks} weeks, "
-            f"averaging {worked_hpw:.1f} h/week ({worked_pct:.1f}%) [horizontal dotted line]."
+            "No completed weeks are available yet to compute an up-until-now weekly average "
+            "[horizontal dotted line]."
         )
 
     if remaining_pct is not None and remaining_hpw is not None and weeks_remaining > 0:
@@ -4095,23 +4327,29 @@ def build_weekly_progress_explanation_html(
             f"the projection is {remaining_hpw:.1f} h/week ({remaining_pct:.1f}%) for the remainder of the year "
             "[horizontal dashed line]."
         )
-        if worked_pct > remaining_pct:
+        if worked_pct is None:
             comparison_sentence = (
-                f"Given that {worked_pct:.1f}% (up until now) is larger than {remaining_pct:.1f}% "
-                "(spread over remaining weeks), the remainder of the year can run at a lower weekly pace "
-                "than the average pace so far."
-            )
-        elif worked_pct < remaining_pct:
-            comparison_sentence = (
-                f"Given that {worked_pct:.1f}% (up until now) is smaller than {remaining_pct:.1f}% "
-                "(spread over remaining weeks), the remainder of the year requires a higher weekly pace "
-                "than the average pace so far."
+                "Comparison between up-until-now pace and remainder projection is not available yet "
+                "because no completed weeks are available."
             )
         else:
-            comparison_sentence = (
-                f"Given that {worked_pct:.1f}% (up until now) equals {remaining_pct:.1f}% "
-                "(spread over remaining weeks), the remainder of the year can continue at the same average pace."
-            )
+            if worked_pct > remaining_pct:
+                comparison_sentence = (
+                    f"Given that {worked_pct:.1f}% (up until now) is larger than {remaining_pct:.1f}% "
+                    "(spread over remaining weeks), the remainder of the year can run at a lower weekly pace "
+                    "than the average pace so far."
+                )
+            elif worked_pct < remaining_pct:
+                comparison_sentence = (
+                    f"Given that {worked_pct:.1f}% (up until now) is smaller than {remaining_pct:.1f}% "
+                    "(spread over remaining weeks), the remainder of the year requires a higher weekly pace "
+                    "than the average pace so far."
+                )
+            else:
+                comparison_sentence = (
+                    f"Given that {worked_pct:.1f}% (up until now) equals {remaining_pct:.1f}% "
+                    "(spread over remaining weeks), the remainder of the year can continue at the same average pace."
+                )
     else:
         remaining_sentence = "No remaining weeks are available in the current year for a remainder projection."
         comparison_sentence = "Comparison between worked-so-far and remainder projection percentages is not available."
@@ -7288,6 +7526,13 @@ def generate_reports(report_type: str, asof_date: date) -> None:
                     weekly_progress_guidance,
                     weekly_ref_source,
                 )
+                estimated_magnitude_explanation_html = build_estimated_magnitude_explanation_html(
+                    weekly_ref,
+                    weekly_ref_source,
+                    weekly_progress_guidance,
+                )
+                if estimated_magnitude_explanation_html:
+                    percentage_explanation_html += estimated_magnitude_explanation_html
             percentage_fig = build_percentage_figure_from_hours(
                 hours_fig,
                 total_period_hours=total_period_hours,
@@ -7396,6 +7641,13 @@ def generate_reports(report_type: str, asof_date: date) -> None:
             percentage_explanation_html = build_monthly_average_explanation_html(
                 weekly_progress_guidance,
             )
+            estimated_magnitude_explanation_html = build_estimated_magnitude_explanation_html(
+                weekly_ref,
+                weekly_ref_source,
+                weekly_progress_guidance,
+            )
+            if estimated_magnitude_explanation_html:
+                percentage_explanation_html += estimated_magnitude_explanation_html
             percentage_fig = build_percentage_figure_from_hours(
                 hours_fig,
                 total_period_hours=total_period_hours,
@@ -7562,6 +7814,13 @@ def generate_reports(report_type: str, asof_date: date) -> None:
                 weekly_progress_guidance,
                 weekly_ref_source,
             )
+            estimated_magnitude_explanation_html = build_estimated_magnitude_explanation_html(
+                weekly_ref,
+                weekly_ref_source,
+                weekly_progress_guidance,
+            )
+            if estimated_magnitude_explanation_html:
+                percentage_explanation_html += estimated_magnitude_explanation_html
         elif rtype == "monthly":
             weekly_progress_guidance = compute_monthly_average_guidance(
                 time_entries_filtered,
@@ -7573,6 +7832,13 @@ def generate_reports(report_type: str, asof_date: date) -> None:
             percentage_explanation_html = build_monthly_average_explanation_html(
                 weekly_progress_guidance,
             )
+            estimated_magnitude_explanation_html = build_estimated_magnitude_explanation_html(
+                weekly_ref,
+                weekly_ref_source,
+                weekly_progress_guidance,
+            )
+            if estimated_magnitude_explanation_html:
+                percentage_explanation_html += estimated_magnitude_explanation_html
         percentage_fig = build_percentage_figure_from_hours(
             hours_fig,
             total_period_hours=total_period_hours,
